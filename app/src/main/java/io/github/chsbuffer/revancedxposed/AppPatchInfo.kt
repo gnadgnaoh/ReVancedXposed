@@ -1,7 +1,8 @@
 package io.github.chsbuffer.revancedxposed
 
 import io.github.chsbuffer.revancedxposed.googlephotos.GooglePhotosPatches
-import io.github.chsbuffer.revancedxposed.meta.MetaPatches
+import io.github.chsbuffer.revancedxposed.instagram.InstagramPatches
+import io.github.chsbuffer.revancedxposed.threads.ThreadsPatches
 import io.github.chsbuffer.revancedxposed.music.YTMusicPatches
 import io.github.chsbuffer.revancedxposed.photomath.PhotomathPatches
 import io.github.chsbuffer.revancedxposed.reddit.RedditPatches
@@ -15,8 +16,8 @@ val appPatchConfigurations = listOf(
     AppPatchInfo("YT Music", "com.google.android.apps.youtube.music", YTMusicPatches),
     AppPatchInfo("Reddit", "com.reddit.frontpage", RedditPatches),
     AppPatchInfo("Google Photos", "com.google.android.apps.photos", GooglePhotosPatches),
-    AppPatchInfo("Instagram", "com.instagram.android", MetaPatches),
-    AppPatchInfo("Threads", "com.instagram.barcelona", MetaPatches),
+    AppPatchInfo("Instagram", "com.instagram.android", InstagramPatches),
+    AppPatchInfo("Threads", "com.instagram.barcelona", ThreadsPatches),
     AppPatchInfo("Strava", "com.strava", StravaPatches),
     AppPatchInfo("Photomath", "com.microblink.photomath", PhotomathPatches),
 )
