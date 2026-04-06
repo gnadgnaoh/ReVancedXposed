@@ -2,7 +2,7 @@
 
 ## Project Structure
 
-The primary hook entry point is [MainHook.kt](app/src/main/java/io/github/nexalloy/morpe/MainHook.kt).
+The primary hook entry point is [MainHook.kt](app/src/main/java/io/github/nexalloy/MainHook.kt).
 
 ### Patch Organization and Conventions
 
