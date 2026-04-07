@@ -5,6 +5,7 @@ import app.morphe.extension.shared.Utils
 import io.github.nexalloy.ExtensionResourceHook
 import io.github.nexalloy.addModuleAssets
 import io.github.nexalloy.injectHostClassLoaderToSelf
+import io.github.nexalloy.injectSelfClassLoaderToHost
 import io.github.nexalloy.patch
 import io.github.nexalloy.morphe.shared.misc.CheckRecycleBitmapMediaSession
 import io.github.nexalloy.morphe.youtube.ad.general.HideAds
@@ -34,6 +35,7 @@ import org.luckypray.dexkit.wrap.DexMethod
 
 val ExtensionHook = patch(name = "<ExtensionHook>") {
     injectHostClassLoaderToSelf(this::class.java.classLoader!!, classLoader)
+    injectSelfClassLoaderToHost(this::class.java.classLoader!!, classLoader)
     DexMethod("$YOUTUBE_MAIN_ACTIVITY_CLASS_TYPE->onCreate(Landroid/os/Bundle;)V").hookMethod {
         before {
             val mainActivity = it.thisObject as Activity

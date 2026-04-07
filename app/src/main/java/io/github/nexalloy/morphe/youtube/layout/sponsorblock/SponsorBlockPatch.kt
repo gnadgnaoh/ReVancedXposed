@@ -4,7 +4,6 @@ import android.graphics.Canvas
 import android.graphics.Rect
 import android.os.Build
 import android.view.ViewGroup
-import app.morphe.extension.shared.Logger
 import app.morphe.extension.shared.ResourceUtils
 import app.morphe.extension.youtube.sponsorblock.SegmentPlaybackController
 import app.morphe.extension.youtube.sponsorblock.ui.CreateSegmentButton
@@ -13,11 +12,7 @@ import app.morphe.extension.youtube.sponsorblock.ui.SponsorBlockPreferenceGroup
 import app.morphe.extension.youtube.sponsorblock.ui.SponsorBlockStatsPreferenceCategory
 import app.morphe.extension.youtube.sponsorblock.ui.SponsorBlockViewController
 import app.morphe.extension.youtube.sponsorblock.ui.VotingButton
-import de.robv.android.xposed.XposedHelpers
 import io.github.nexalloy.R
-import io.github.nexalloy.patch
-import io.github.nexalloy.scopedHook
-import io.github.nexalloy.setObjectField
 import io.github.nexalloy.morphe.shared.misc.settings.preference.NonInteractivePreference
 import io.github.nexalloy.morphe.shared.misc.settings.preference.PreferenceCategory
 import io.github.nexalloy.morphe.shared.misc.settings.preference.PreferenceScreenPreference
@@ -32,6 +27,8 @@ import io.github.nexalloy.morphe.youtube.video.information.onCreateHook
 import io.github.nexalloy.morphe.youtube.video.information.videoTimeHooks
 import io.github.nexalloy.morphe.youtube.video.videoid.VideoId
 import io.github.nexalloy.morphe.youtube.video.videoid.videoIdHooks
+import io.github.nexalloy.patch
+import io.github.nexalloy.scopedHook
 import org.luckypray.dexkit.wrap.DexMethod
 
 val SponsorBlock = patch(
@@ -162,24 +159,4 @@ val SponsorBlock = patch(
             SegmentPlaybackController.setAdProgressTextVisibility(it.args[0] as Int)
         }
     })
-
-    fun injectClassLoader(self: ClassLoader, host: ClassLoader) {
-        val findClassMethod =
-            XposedHelpers.findMethodExact(ClassLoader::class.java, "findClass", String::class.java)
-        host.setObjectField("parent", object : ClassLoader(host.parent) {
-            override fun findClass(name: String): Class<*> {
-                try {
-                    if (name.startsWith("app.morphe")){
-                        return findClassMethod(self, name) as Class<*>
-                    }
-                } catch (_: ClassNotFoundException) {
-                    Logger.printException { "Unexcepted ClassNotFoundException: $name" }
-                }
-
-                throw ClassNotFoundException(name)
-            }
-        })
-    }
-
-    injectClassLoader(this::class.java.classLoader!!, classLoader)
 }

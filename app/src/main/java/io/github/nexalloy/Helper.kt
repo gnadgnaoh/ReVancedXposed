@@ -6,6 +6,7 @@ import android.content.res.loader.ResourcesProvider
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.annotation.RequiresApi
+import app.morphe.extension.shared.Logger
 import app.morphe.extension.shared.Utils
 import de.robv.android.xposed.IXposedHookZygoteInit
 import de.robv.android.xposed.XC_MethodHook
@@ -126,6 +127,30 @@ fun Context.addModuleAssets() {
     }
 
     resources.assets.callMethod("addAssetPath", XposedInit.modulePath)
+}
+
+// Module layouts (e.g. morphe_sb_inline_sponsor_overlay.xml) reference module classes
+// (app.morphe.*) via class attributes. When the host app inflates these layouts, its
+// ClassLoader cannot find those classes.
+// This method injects the module's ClassLoader into the host's classloader chain by
+// replacing host.parent with a proxy ClassLoader that delegates app.morphe.* lookups
+// to the module's own ClassLoader before falling back to the original parent.
+fun injectSelfClassLoaderToHost(self: ClassLoader, host: ClassLoader) {
+    val findClassMethod =
+        XposedHelpers.findMethodExact(ClassLoader::class.java, "findClass", String::class.java)
+    host.setObjectField("parent", object : ClassLoader(host.parent) {
+        override fun findClass(name: String): Class<*> {
+            try {
+                if (name.startsWith("app.morphe")) {
+                    return findClassMethod(self, name) as Class<*>
+                }
+            } catch (_: ClassNotFoundException) {
+                Logger.printException { "Unexcepted ClassNotFoundException: $name" }
+            }
+
+            throw ClassNotFoundException(name)
+        }
+    })
 }
 
 fun injectHostClassLoaderToSelf(self: ClassLoader, host: ClassLoader) {
