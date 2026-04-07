@@ -209,7 +209,7 @@ open class Fingerprint internal constructor(
     parameters: List<String>? = null,
     val filters: List<InstructionFilter>? = null,
     strings: List<String>? = null,
-    custom: Any? = null
+    custom: (MethodMatcher.() -> Unit)? = null
 ) {
     internal var classFinder: FindClassFunc? = null
     internal var classMatcherBlock: (ClassMatcher.() -> Unit)? = null
@@ -219,6 +219,8 @@ open class Fingerprint internal constructor(
         if (classFingerprint != null) {
             classFinder = { classFingerprint.run().declaredClass!! }
         }
+        if(custom != null)
+            extraMethodMatcherBlocks = listOf(custom)
     }
 
     /**
@@ -280,7 +282,7 @@ open class Fingerprint internal constructor(
         parameters: List<String>? = null,
         filters: List<InstructionFilter>? = null,
         strings: List<String>? = null,
-        custom: Any? = null,
+        custom: (MethodMatcher.() -> Unit)? = null,
     ) : this(
         classFingerprint, null, name, accessFlags, returnType, parameters, filters, strings, custom
     )
@@ -306,7 +308,7 @@ open class Fingerprint internal constructor(
         parameters: List<String>? = null,
         filters: List<InstructionFilter>? = null,
         strings: List<String>? = null,
-        custom: Any? = null,
+        custom: (MethodMatcher.() -> Unit)? = null,
     ) : this(
         null, null, name, accessFlags, returnType, parameters, filters, strings, custom
     )
@@ -335,7 +337,7 @@ open class Fingerprint internal constructor(
         parameters: List<String>? = null,
         filters: List<InstructionFilter>? = null,
         strings: List<String>? = null,
-        custom: Any? = null,
+        custom: (MethodMatcher.() -> Unit)? = null,
     ) : this(
         null, definingClass, name, accessFlags, returnType, parameters, filters, strings, custom
     )

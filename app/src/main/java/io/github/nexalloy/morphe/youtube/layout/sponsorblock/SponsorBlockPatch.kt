@@ -4,6 +4,7 @@ import android.graphics.Canvas
 import android.graphics.Rect
 import android.os.Build
 import android.view.ViewGroup
+import android.widget.TextView
 import app.morphe.extension.shared.ResourceUtils
 import app.morphe.extension.youtube.sponsorblock.SegmentPlaybackController
 import app.morphe.extension.youtube.sponsorblock.ui.CreateSegmentButton
@@ -154,9 +155,11 @@ val SponsorBlock = patch(
         }
     })
 
-    ::adProgressTextViewVisibilityFingerprint.hookMethod(scopedHook(::AdProgressTextVisibility.method) {
-        before {
-            SegmentPlaybackController.setAdProgressTextVisibility(it.args[0] as Int)
+    AdProgressTextViewVisibilityFingerprint.hookMethod {
+        val adProgressTextField = ::AdProgressTextField.field
+        after {
+            val textView = adProgressTextField.get(it.thisObject) as TextView
+            SegmentPlaybackController.setAdProgressTextVisibility(textView.visibility)
         }
-    })
+    }
 }

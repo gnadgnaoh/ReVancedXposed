@@ -2,15 +2,14 @@ package io.github.nexalloy.morphe.youtube.layout.sponsorblock
 
 import io.github.nexalloy.morphe.AccessFlags
 import io.github.nexalloy.morphe.Fingerprint
+import io.github.nexalloy.morphe.InstructionLocation.MatchAfterWithin
 import io.github.nexalloy.morphe.Opcode
 import io.github.nexalloy.morphe.OpcodesFilter
-import io.github.nexalloy.morphe.accessFlags
+import io.github.nexalloy.morphe.fieldAccess
 import io.github.nexalloy.morphe.findFieldDirect
 import io.github.nexalloy.morphe.findMethodDirect
-import io.github.nexalloy.morphe.fingerprint
-import io.github.nexalloy.morphe.parameters
+import io.github.nexalloy.morphe.opcode
 import io.github.nexalloy.morphe.resourceMappings
-import io.github.nexalloy.morphe.returns
 import io.github.nexalloy.morphe.youtube.shared.seekbarFingerprint
 
 internal object AppendTimeFingerprint : Fingerprint(
@@ -64,17 +63,25 @@ val controlsOverlayFingerprint = findMethodDirect {
     }.single()
 }
 
-val AdProgressTextVisibility = fingerprint {
-    definingClass("Lcom/google/android/libraries/youtube/ads/player/ui/AdProgressTextView;")
-    name("setVisibility")
-}
-
-internal val adProgressTextViewVisibilityFingerprint = findMethodDirect {
-    AdProgressTextVisibility().callers.findMethod {
-        matcher {
-            accessFlags(AccessFlags.PUBLIC, AccessFlags.FINAL)
-            returns("V")
-            parameters("Z")
+internal object AdProgressTextViewVisibilityFingerprint : Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "V",
+    parameters = listOf("Z"),
+    filters = listOf(
+        fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            type = "Ljava/lang/Object;"
+        ),
+        opcode(opcode = Opcode.CHECK_CAST, location = MatchAfterWithin(4)),
+    ),
+    custom = {
+        addInvoke {
+            descriptor =
+                "Lcom/google/android/libraries/youtube/ads/player/ui/AdProgressTextView;->setVisibility(I)V"
         }
-    }.single()
+    }
+)
+
+val AdProgressTextField = findFieldDirect {
+    AdProgressTextViewVisibilityFingerprint.instructionMatches[0].instruction.fieldRef!!
 }
