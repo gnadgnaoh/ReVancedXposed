@@ -8,6 +8,11 @@
 </div>
 
 **ChsBuffer's LSPosed module, powered by Morphe, ReVanced, and beyond.**  
+> [!CAUTION]
+> **Migration Notice:** This project has evolved from **ReVancedXposed** to **NexAlloy**. 
+> 
+> **Upgrading:** We’ve kept the original Package ID for your convenience. You can install this as an update, but **you must manually export your settings from the old version and import them into the new one** to keep your configuration.
+
 >[!IMPORTANT]  
 > - This is **NOT an official Morphe or ReVanced project**, do not ask their developers for help.  
 > - **Root access** is strictly **required** to use this module!
@@ -80,4 +85,4 @@ or [Create an issue](https://github.com/NexAlloy/NexAlloy/issues/new/choose)
 
 [DexKit](https://luckypray.org/DexKit/en/): a high-performance dex runtime parsing library.  
 [Morphe](https://morphe.software): Transform Your Android Apps  
-[ReVanced](https://revanced.app): Continuing the legacy of Vanced at [revanced.app](https://revanced.app)  
+[ReVanced](https://revanced.app): Continuing the legacy of Vanced at [revanced.app](https://revanced.app)

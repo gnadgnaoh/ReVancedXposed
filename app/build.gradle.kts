@@ -26,9 +26,9 @@ android {
     namespace = "io.github.nexalloy"
 
     defaultConfig {
-        applicationId = "io.github.nexalloy"
-        versionCode = 3
-        versionName = "1.0.$versionCode"
+        applicationId = "io.github.chsbuffer.revancedxposed"
+        versionCode = 100
+        versionName = "2.0.$versionCode"
         val patchVersion = Properties().apply {
             rootProject.file("morphe-patches/gradle.properties").inputStream().use { load(it) }
         }["version"]
