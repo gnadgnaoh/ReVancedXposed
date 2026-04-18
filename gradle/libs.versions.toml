@@ -1,5 +1,5 @@
 [versions]
-agp = "9.1.0"
+agp = "9.1.1"
 dexkit = "2.2.0"
 xposed = "82"
 annotation = "1.9.1"
