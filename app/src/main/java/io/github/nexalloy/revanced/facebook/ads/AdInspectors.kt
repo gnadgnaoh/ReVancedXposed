@@ -234,10 +234,10 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
         if (isLikelyAdTypeName(typeName) || isAdSignalText(unitClassName)) return true
 
         // 5. String-signal scan on all layers (catches banner/deferred-card/floatingCTA)
-        // if (containsKnownAdSignals(value)) return true
-        // if (containsKnownAdSignals(invokeNoThrow(itemModelAccessor, value))) return true
-        // if (containsKnownAdSignals(edge)) return true
-        // if (containsKnownAdSignals(feedUnit)) return true
+        if (containsKnownAdSignals(value)) return true
+        if (containsKnownAdSignals(invokeNoThrow(itemModelAccessor, value))) return true
+        if (containsKnownAdSignals(edge)) return true
+        if (containsKnownAdSignals(feedUnit)) return true
 
         return false
     }
@@ -333,23 +333,12 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
     private fun isSponsoredFeedCategory(v: String?) =
         v != null && v in FEED_AD_CATEGORY_VALUES
 
-    /**
-     * Kiểm tra typeName có chứa các chuỗi nhận diện quảng cáo không.
-     * Mở rộng từ bản gốc để bắt thêm banner signals.
-     */
     private fun isLikelyAdTypeName(value: String?): Boolean {
         if (value == null) return false
         if (value.contains("QuickPromotion", ignoreCase = true)) return true
         return isAdSignalText(value)
     }
 
-    /**
-     * Quét toàn bộ String fields và String-returning methods của object
-     * để tìm các signal token nhận diện banner ads.
-     *
-     * Được thêm mới: bắt banner ads (reels_banner_ad, floatingcta, deferred_card, ...)
-     * mà không lọc được qua enum category hoặc class name.
-     */
     private fun containsKnownAdSignals(value: Any?): Boolean {
         if (value == null) return false
         if (value is CharSequence) return isAdSignalText(value.toString())
@@ -357,12 +346,26 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
         if (isAdSignalText(type.name)) return true
         if (type.isEnum) return isAdSignalText(value.toString())
         if (type.isPrimitive || value is Number || value is Boolean) return false
-        if (isAdSignalText(runCatching { value.toString() }.getOrNull())) return true
         for (method in stringAccessorsFor(type)) {
+            if (!isTechnicalFieldName(method.name)) continue
             if (isAdSignalText(invokeNoThrow(method, value) as? String)) return true
         }
         for (field in stringFieldsFor(type)) {
+            if (!isTechnicalFieldName(field.name)) continue
             if (isAdSignalText(runCatching { field.get(value) as? String }.getOrNull())) return true
+        }
+        return false
+    }
+
+    private fun isTechnicalFieldName(name: String): Boolean {
+        val lower = name.lowercase()
+        val allowed = listOf("type", "kind", "category", "format", "unit", "key",
+            "tag", "label", "mode", "state", "class", "id", "name", "slot", "placement")
+        if (allowed.any { lower.contains(it) }) {
+            val blocked = listOf("text", "body", "message", "content", "caption",
+                "description", "subtitle", "title", "story", "header", "summary")
+            if (blocked.any { lower.contains(it) }) return false
+            return true
         }
         return false
     }
