@@ -108,7 +108,7 @@ class AppPatchSettingsActivity : Activity() {
                     key = patchInfo.name // Pref Key
                     title = patchInfo.name
                     summary = patchInfo.description
-                    setDefaultValue(true)
+                    setDefaultValue(patchInfo.use)
                     setOnPreferenceChangeListener { _, _ ->
                         val vibrator =
                             context.getSystemService(VIBRATOR_SERVICE) as Vibrator?

@@ -40,10 +40,20 @@ typealias FindMethodFunc = DexKitBridge.() -> MethodData
 typealias FindMethodListFunc = DexKitBridge.() -> List<MethodData>
 typealias FindFieldFunc = DexKitBridge.() -> FieldData
 
-fun patch(name: String = "", description: String = "", func: PatchExecutor.() -> Unit) =
-    Patch(name, description, func)
+fun patch(
+    name: String = "",
+    description: String = "",
+    use: Boolean = true,
+    func: PatchExecutor.() -> Unit
+) =
+    Patch(name, description, use, func)
 
-class Patch(val name: String, val description: String, val run: PatchExecutor.() -> Unit)
+class Patch(
+    val name: String,
+    val description: String,
+    val use: Boolean,
+    val run: PatchExecutor.() -> Unit
+)
 
 interface IHook {
     val classLoader: ClassLoader
@@ -133,7 +143,7 @@ class DependedHookFailedException(
 ) : Exception("Depended hook $subHookName failed.", exception)
 
 @SuppressLint("CommitPrefEdits")
-class PatchExecutor(val appContext: Application, val lpparam: LoadPackageParam): IHook {
+class PatchExecutor(val appContext: Application, val lpparam: LoadPackageParam) : IHook {
     override val classLoader = lpparam.classLoader!!
 
     /**
@@ -198,7 +208,8 @@ class PatchExecutor(val appContext: Application, val lpparam: LoadPackageParam):
             /**
              * @see io.github.nexalloy.activity.AppPatchSettingsActivity.AppPatchSettingsFragment.onCreate
              * */
-            if (patchPreferences?.getBoolean(hook.name, true) == false) return@forEach // Pref Key
+            val isEnabled = patchPreferences?.getBoolean(hook.name, hook.use) ?: hook.use
+            if (!isEnabled) return@forEach // Pref Key
             runCatching { hook.run(this) }.onFailure { err ->
                 XposedBridge.log(err)
                 failedPatches.add(hook)
