@@ -2,14 +2,14 @@ package io.github.nexalloy.morphe.youtube.misc.engagement
 
 
 import app.morphe.extension.youtube.shared.EngagementPanel
-import io.github.nexalloy.patch
 import io.github.nexalloy.morphe.youtube.shared.EngagementPanelControllerFingerprint
+import io.github.nexalloy.patch
 
 typealias EngagementPanelIdHook = (String?) -> Boolean
 
 private val engagementPanelIdHooks = mutableListOf<EngagementPanelIdHook>()
 
-val engagementPanelHookPatch = patch(
+val EngagementPanelHook = patch(
     description = "Hook to get the current engagement panel state.",
 ) {
     val panelId = ThreadLocal<String?>()

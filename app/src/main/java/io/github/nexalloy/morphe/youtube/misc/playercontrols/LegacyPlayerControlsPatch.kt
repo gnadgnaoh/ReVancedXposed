@@ -8,11 +8,14 @@ import android.widget.RelativeLayout
 import app.morphe.extension.shared.ResourceUtils
 import app.morphe.extension.shared.Utils
 import app.morphe.extension.youtube.patches.LegacyPlayerControlsPatch
+import io.github.nexalloy.HookDsl
+import io.github.nexalloy.IHookCallback
 import io.github.nexalloy.PatchExecutor
 import io.github.nexalloy.morphe.Fingerprint
 import io.github.nexalloy.morphe.LiteralFilter
 import io.github.nexalloy.morphe.shared.misc.settings.preference.SwitchPreference
 import io.github.nexalloy.morphe.youtube.misc.litho.filter.featureFlagCheck
+import io.github.nexalloy.morphe.youtube.misc.playservice.VersionCheck
 import io.github.nexalloy.morphe.youtube.misc.playservice.is_20_28_or_greater
 import io.github.nexalloy.morphe.youtube.misc.playservice.is_20_30_or_greater
 import io.github.nexalloy.morphe.youtube.misc.playservice.is_20_31_or_greater
@@ -120,6 +123,11 @@ private fun onBottomContainerInflate(viewStub: ViewStub, root: ViewGroup) {
 val LegacyPlayerControls = patch(
     description = "Manages the code for the player controls of the YouTube player.",
 ) {
+    dependsOn(
+        PlayerControlsOverlayVisibility,
+        VersionCheck,
+    )
+
     if (is_20_31_or_greater) {
         PreferenceScreen.PLAYER.addPreferences(
             SwitchPreference("morphe_restore_old_player_buttons")
@@ -152,7 +160,7 @@ val LegacyPlayerControls = patch(
     val youtube_controls_bottom_ui_container =
         ResourceUtils.getIdIdentifier("youtube_controls_bottom_ui_container")
 
-    DexMethod("Landroid/support/constraint/ConstraintLayout;->onLayout(ZIIII)V").hookMethod {
+    val onLayoutHook: HookDsl<IHookCallback>.() -> Unit = {
         after {
             val controlsView = it.thisObject as ViewGroup
             if (controlsView.id != youtube_controls_bottom_ui_container) return@after
@@ -174,6 +182,9 @@ val LegacyPlayerControls = patch(
             }
         }
     }
+
+    DexMethod("Landroid/support/constraint/ConstraintLayout;->onLayout(ZIIII)V").hookMethod(onLayoutHook)
+    DexMethod("Landroidx/constraintlayout/widget/ConstraintLayout;->onLayout(ZIIII)V").hookMethod(onLayoutHook)
 }
 
 private fun PatchExecutor.initInjectVisibilityCheckCall() {
@@ -188,7 +199,7 @@ private fun PatchExecutor.initInjectVisibilityCheckCall() {
 
     // Hook the fullscreen close button. Used to fix visibility
     // when seeking and other situations.
-    ::overlayViewInflateFingerprint.hookMethod(scopedHook(DexMethod("Landroid/view/View;->findViewById(I)Landroid/view/View;").toMember()) {
+    OverlayViewInflateFingerprint.hookMethod(scopedHook(DexMethod("Landroid/view/View;->findViewById(I)Landroid/view/View;").toMember()) {
         val fullscreenButtonId = fullscreen_button_id
         after {
             if (it.args[0] == fullscreenButtonId) {

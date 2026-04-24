@@ -2,12 +2,18 @@ package io.github.nexalloy.morphe.youtube.misc.litho.filter
 
 import io.github.nexalloy.morphe.AccessFlags
 import io.github.nexalloy.morphe.Fingerprint
+import io.github.nexalloy.morphe.InstructionLocation.MatchAfterImmediately
+import io.github.nexalloy.morphe.InstructionLocation.MatchAfterWithin
 import io.github.nexalloy.morphe.Opcode
 import io.github.nexalloy.morphe.OpcodesFilter
+import io.github.nexalloy.morphe.fieldAccess
 import io.github.nexalloy.morphe.findClassDirect
 import io.github.nexalloy.morphe.findFieldDirect
 import io.github.nexalloy.morphe.findMethodDirect
 import io.github.nexalloy.morphe.fingerprint
+import io.github.nexalloy.morphe.methodCall
+import io.github.nexalloy.morphe.opcode
+import io.github.nexalloy.morphe.string
 import io.github.nexalloy.morphe.youtube.shared.conversionContextFingerprintToString
 import org.luckypray.dexkit.result.FieldUsingType
 
@@ -15,10 +21,73 @@ import org.luckypray.dexkit.result.FieldUsingType
 //    strings("Number of bits must be positive")
 //}
 
+internal object AccessibilityIdFingerprint : Fingerprint(
+    filters = listOf(
+        methodCall(
+            opcode = Opcode.INVOKE_INTERFACE,
+            parameters = listOf(),
+            returnType = "Ljava/lang/String;"
+        ),
+        string("primary_image", location = MatchAfterWithin(5)),
+    )
+)
+
+val AccessibilityIdMethod = findMethodDirect {
+    AccessibilityIdFingerprint.instructionMatches.first().instruction.methodRef!!
+}
+
+val accessibilityTextMethod = findMethodDirect {
+    Fingerprint(
+        returnType = "V",
+        filters = listOf(
+            methodCall(
+                opcode = Opcode.INVOKE_INTERFACE,
+                parameters = listOf(),
+                returnType = "Ljava/lang/String;"
+            ),
+            methodCall(
+                reference = AccessibilityIdMethod(),
+                location = MatchAfterWithin(5)
+            )
+        ),
+        custom = {
+        }
+    ).instructionMatches.first().instruction.methodRef!!
+}
+
+val buttonViewModelReceiver = findMethodDirect {
+    ComponentCreateFingerprint.instructionMatches[2].instruction.methodRef!!
+}
+
 object ComponentCreateFingerprint : Fingerprint(
-    strings = listOf(
-        "Element missing correct type extension",
-        "Element missing type"
+    returnType = "L",
+    filters = listOf(
+        opcode(Opcode.IF_EQZ),
+        opcode(
+            Opcode.CHECK_CAST,
+            location = MatchAfterWithin(5)
+        ),
+        opcode(Opcode.INVOKE_STATIC, MatchAfterImmediately()),
+        opcode(Opcode.RETURN_OBJECT),
+        string("Element missing correct type extension"),
+        string("Element missing type")
+    )
+)
+
+internal object ProtobufBufferEncodeFingerprint : Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "[B",
+    parameters = listOf(),
+    filters = listOf(
+        fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+//            definingClass = "this",
+            type = "Lcom/google/android/libraries/elements/adl/UpbMessage;"
+        ),
+        methodCall(
+            definingClass = "Lcom/google/android/libraries/elements/adl/UpbMessage;",
+            name = "jniEncode"
+        )
     )
 )
 

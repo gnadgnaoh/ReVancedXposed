@@ -22,13 +22,17 @@ import io.github.nexalloy.morphe.shared.misc.settings.preference.PreferenceScree
 import io.github.nexalloy.morphe.shared.misc.settings.preference.PreferenceScreenPreference.Sorting
 import io.github.nexalloy.morphe.shared.misc.settings.preference.SwitchPreference
 import io.github.nexalloy.morphe.shared.misc.settings.preference.TextPreference
+import io.github.nexalloy.morphe.youtube.layout.buttons.navigation.NavigationBar
+import io.github.nexalloy.morphe.youtube.misc.engagement.EngagementPanelHook
 import io.github.nexalloy.morphe.youtube.misc.litho.filter.LithoFilter
 import io.github.nexalloy.morphe.youtube.misc.litho.filter.addLithoFilter
 import io.github.nexalloy.morphe.youtube.misc.litho.filter.emptyComponentClass
 import io.github.nexalloy.morphe.youtube.misc.litho.filter.featureFlagCheck
-import io.github.nexalloy.morphe.youtube.misc.litho.lazily.LazilyConvertedElementHook
-import io.github.nexalloy.morphe.youtube.misc.litho.lazily.hookTreeNodeResult
+import io.github.nexalloy.morphe.youtube.misc.litho.node.TreeNodeElementHook
+import io.github.nexalloy.morphe.youtube.misc.litho.node.hookTreeNodeResult
+import io.github.nexalloy.morphe.youtube.misc.litho.observer.LayoutReloadObserver
 import io.github.nexalloy.morphe.youtube.misc.navigation.NavigationBarHook
+import io.github.nexalloy.morphe.youtube.misc.playertype.PlayerTypeHook
 import io.github.nexalloy.morphe.youtube.misc.playservice.VersionCheck
 import io.github.nexalloy.morphe.youtube.misc.playservice.is_20_26_or_greater
 import io.github.nexalloy.morphe.youtube.misc.settings.PreferenceScreen
@@ -37,7 +41,15 @@ import io.github.nexalloy.patch
 import io.github.nexalloy.scopedHook
 import org.luckypray.dexkit.wrap.DexMethod
 
-val hideHorizontalShelvesPatch = patch {
+val HideHorizontalShelves = patch {
+    dependsOn(
+        LithoFilter,
+        PlayerTypeHook,
+        NavigationBar,
+        EngagementPanelHook,
+        LayoutReloadObserver
+    )
+
     addLithoFilter(HorizontalShelvesFilter())
 }
 
@@ -47,10 +59,11 @@ val HideLayoutComponents = patch(
 ) {
     dependsOn(
         LithoFilter,
+        EngagementPanelHook,
         NavigationBarHook,
         VersionCheck,
-        LazilyConvertedElementHook,
-        hideHorizontalShelvesPatch
+        HideHorizontalShelves,
+        TreeNodeElementHook,
     )
 
     PreferenceScreen.ADS.addPreferences(

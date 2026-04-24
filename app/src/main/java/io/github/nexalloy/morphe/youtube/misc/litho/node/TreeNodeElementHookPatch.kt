@@ -1,8 +1,8 @@
-package io.github.nexalloy.morphe.youtube.misc.litho.lazily
+package io.github.nexalloy.morphe.youtube.misc.litho.node
 
-import io.github.nexalloy.patch
 import io.github.nexalloy.morphe.youtube.misc.litho.filter.LithoFilter
 import io.github.nexalloy.morphe.youtube.misc.litho.filter.identifierFieldData
+import io.github.nexalloy.patch
 
 /**
  * Hooks the tree node result list to allow filtering lazily converted elements.
@@ -24,7 +24,9 @@ fun hookTreeNodeResult(handler: (String, MutableList<Any>) -> Unit) {
     treeNodeResultHooks.add(handler)
 }
 
-val LazilyConvertedElementHook = patch {
+val TreeNodeElementHook = patch(
+    description = "Hooks the tree node element lists to the extension."
+) {
     dependsOn(LithoFilter)
 
     val identifierField = ::identifierFieldData.field

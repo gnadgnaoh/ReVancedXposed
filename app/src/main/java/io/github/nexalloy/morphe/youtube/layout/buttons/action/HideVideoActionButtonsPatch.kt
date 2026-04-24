@@ -3,21 +3,26 @@ package io.github.nexalloy.morphe.youtube.layout.buttons.action
 import app.morphe.extension.youtube.innertube.NextResponseOuterClass
 import app.morphe.extension.youtube.patches.components.VideoActionButtonsFilter
 import io.github.nexalloy.callMethod
-import io.github.nexalloy.patch
 import io.github.nexalloy.morphe.shared.misc.settings.preference.PreferenceScreenPreference
 import io.github.nexalloy.morphe.shared.misc.settings.preference.SwitchPreference
 import io.github.nexalloy.morphe.youtube.misc.litho.filter.LithoFilter
 import io.github.nexalloy.morphe.youtube.misc.litho.filter.addLithoFilter
-import io.github.nexalloy.morphe.youtube.misc.litho.lazily.LazilyConvertedElementHook
-import io.github.nexalloy.morphe.youtube.misc.litho.lazily.hookTreeNodeResult
+import io.github.nexalloy.morphe.youtube.misc.litho.node.TreeNodeElementHook
+import io.github.nexalloy.morphe.youtube.misc.litho.node.hookTreeNodeResult
 import io.github.nexalloy.morphe.youtube.misc.settings.PreferenceScreen
 import io.github.nexalloy.morphe.youtube.shared.WatchNextResponseParserFingerprint
+import io.github.nexalloy.morphe.youtube.video.information.VideoInformationPatch
+import io.github.nexalloy.patch
 
 val HideVideoActionButtons = patch(
     name = "Hide video action buttons",
     description = "Adds options to hide action buttons (such as the Download button) under videos.",
 ) {
-    dependsOn(LithoFilter, LazilyConvertedElementHook)
+    dependsOn(
+        LithoFilter,
+        TreeNodeElementHook,
+        VideoInformationPatch
+    )
 
     PreferenceScreen.PLAYER.addPreferences(
         PreferenceScreenPreference(

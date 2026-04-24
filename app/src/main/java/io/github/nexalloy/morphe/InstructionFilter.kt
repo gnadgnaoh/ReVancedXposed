@@ -626,6 +626,25 @@ fun methodCall(
 )
 
 /**
+ * Matches a method call, such as:
+ * `invoke-virtual {v3, v4}, La;->b(I)V`
+ *
+ * @param reference Exact method reference to match.
+ * @param location Where this filter is allowed to match. Default is anywhere after the previous instruction.
+ */
+fun methodCall(
+    reference: MethodData,
+    location: InstructionLocation = InstructionLocation.MatchAfterAnywhere()
+) = MethodCallFilter(
+    definingClass = reference.declaredClass!!.descriptor,
+    name = reference.name,
+    parameters = reference.paramTypes.map { it.descriptor },
+    returnType = reference.returnType!!.descriptor,
+    opcodes = null,
+    location = location
+)
+
+/**
  * Method call for a copy pasted SMALI style method signature. e.g.:
  * `Landroid/view/View;->inflate(Landroid/content/Context;ILandroid/view/ViewGroup;)Landroid/view/View;`
  *

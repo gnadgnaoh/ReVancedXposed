@@ -325,6 +325,8 @@ class PatchExecutor(val appContext: Application, val lpparam: LoadPackageParam) 
 
     val Fingerprint.method get() = dexMethod.toMethod()
 
+    val Fingerprint.declaredClass get() = classLoader.loadClass(dexMethod.declaredClassName)
+
     val Fingerprint.constructor get() = dexMethod.toConstructor()
 
     private inline fun <reified T : Any> wrapFind(

@@ -1,4 +1,4 @@
-package io.github.nexalloy.morphe.youtube.misc.litho.lazily
+package io.github.nexalloy.morphe.youtube.misc.litho.node
 
 import io.github.nexalloy.morphe.AccessFlags
 import io.github.nexalloy.morphe.Fingerprint

@@ -8,13 +8,13 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedHelpers
 import io.github.nexalloy.morphe.shared.ad.HideFullscreenAds
 import io.github.nexalloy.morphe.shared.misc.settings.preference.SwitchPreference
+import io.github.nexalloy.morphe.youtube.layout.hide.general.HideHorizontalShelves
+import io.github.nexalloy.morphe.youtube.misc.engagement.EngagementPanelHook
 import io.github.nexalloy.morphe.youtube.misc.engagement.addEngagementPanelIdHook
-import io.github.nexalloy.morphe.youtube.misc.engagement.engagementPanelHookPatch
 import io.github.nexalloy.morphe.youtube.misc.litho.filter.LithoFilter
 import io.github.nexalloy.morphe.youtube.misc.litho.filter.addLithoFilter
 import io.github.nexalloy.morphe.youtube.misc.playservice.VersionCheck
 import io.github.nexalloy.morphe.youtube.misc.settings.PreferenceScreen
-import io.github.nexalloy.morphe.youtube.misc.verticalscroll.FixVerticalScroll
 import io.github.nexalloy.patch
 
 val HideAds = patch(
@@ -22,11 +22,12 @@ val HideAds = patch(
     description = "Adds options to remove general ads.",
 ) {
     dependsOn(
-        FixVerticalScroll,
         LithoFilter,
+        EngagementPanelHook,
+        HideHorizontalShelves,
+
+        HideFullscreenAds(PreferenceScreen.ADS),
         VersionCheck,
-        engagementPanelHookPatch,
-        HideFullscreenAds(PreferenceScreen.ADS)
     )
 
     PreferenceScreen.ADS.addPreferences(
