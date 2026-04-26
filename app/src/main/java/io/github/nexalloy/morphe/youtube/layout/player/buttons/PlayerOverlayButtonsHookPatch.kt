@@ -18,8 +18,9 @@ val playerOverlayButtonsHook = patch {
     ExploderUIFullscreenButtonFingerprint.hookMethod(scopedHook(DexMethod("Landroid/view/View;->findViewById(I)Landroid/view/View;").toMember()) {
         val fullscreenButtonId = fullscreen_button_id
         after {
+            if (innerDepth != 0) return@after
             if (it.args[0] == fullscreenButtonId) {
-                val view = it.result as View
+                val view = it.result as? View ?: return@after
                 initializeButtonList.forEach { func -> func(view) }
                 LegacyPlayerControlsPatch.setFullscreenCloseButton(view)
             }

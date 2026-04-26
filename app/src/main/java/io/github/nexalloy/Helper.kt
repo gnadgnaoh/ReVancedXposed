@@ -51,8 +51,10 @@ inline fun Member.hookMethodInternal(
     })
 }
 
-@JvmInline
-value class ScopedHookParam(val outerParam: MethodHookParam)
+data class ScopedHookParam(
+    val outerParam: MethodHookParam,
+    val innerDepth: Int
+)
 
 fun scopedHook(vararg pairs: Pair<Member, HookDsl<IScopedHookCallback>.() -> Unit>): XC_MethodHook {
     val hook = ScopedHook()
@@ -81,24 +83,35 @@ class ScopedHook : XC_MethodHook() {
         XposedBridge.hookMethod(hookMethod, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 val outerParam = outerParam.get() ?: return
-                before(ScopedHookParam(outerParam), param)
+                val depth = innerDepth.get() ?: 0
+                innerDepth.set(depth + 1)
+                before(ScopedHookParam(outerParam, depth), param)
             }
 
             override fun afterHookedMethod(param: MethodHookParam) {
                 val outerParam = outerParam.get() ?: return
-                after(ScopedHookParam(outerParam), param)
+                val depth = ((innerDepth.get() ?: 0) - 1).coerceAtLeast(0)
+                innerDepth.set(depth)
+                try {
+                    after(ScopedHookParam(outerParam, depth), param)
+                } finally {
+                    if (depth == 0) innerDepth.remove()
+                }
             }
         })
     }
 
     val outerParam: ThreadLocal<MethodHookParam> = ThreadLocal<MethodHookParam>()
+    val innerDepth: ThreadLocal<Int> = ThreadLocal.withInitial { 0 }
 
     override fun beforeHookedMethod(param: MethodHookParam) {
         outerParam.set(param)
+        innerDepth.set(0)
     }
 
     override fun afterHookedMethod(param: MethodHookParam) {
         outerParam.remove()
+        innerDepth.remove()
     }
 }
 

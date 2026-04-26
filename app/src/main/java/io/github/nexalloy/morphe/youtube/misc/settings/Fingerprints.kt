@@ -7,23 +7,6 @@ import io.github.nexalloy.morphe.resourceMappings
 import org.luckypray.dexkit.query.enums.StringMatchType
 import java.lang.reflect.Modifier
 
-val PreferenceInflater_inflate = findMethodDirect {
-    findMethod {
-        matcher {
-            returnType = "androidx.preference.Preference"
-            paramTypes(
-                "org.xmlpull.v1.XmlPullParser",
-                "androidx.preference.PreferenceGroup",
-                "android.content.Context",
-                "java.lang.Object[]",
-                null,
-                "java.lang.String[]"
-            )
-            usingEqStrings(": No start tag found!", ": ")
-        }
-    }.single()
-}
-
 val PreferenceFragmentCompatClass = findClassDirect {
     findClass {
         matcher {
