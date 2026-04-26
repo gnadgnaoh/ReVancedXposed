@@ -1,17 +1,14 @@
 package io.github.nexalloy.morphe.youtube.misc.settings
 
 import android.app.Activity
-import app.morphe.extension.shared.Logger
-import app.morphe.extension.shared.Utils
+import app.morphe.extension.shared.ResourceUtils
 import app.morphe.extension.shared.settings.preference.ImportExportPreference
 import app.morphe.extension.shared.settings.preference.about.MorpheAboutPreference
 import app.morphe.extension.youtube.settings.YouTubeActivityHook
 import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedBridge
 import io.github.nexalloy.R
-import io.github.nexalloy.patch
 import io.github.nexalloy.hookMethod
-import io.github.nexalloy.scopedHook
 import io.github.nexalloy.morphe.shared.misc.settings.preference.BasePreferenceScreen
 import io.github.nexalloy.morphe.shared.misc.settings.preference.InputType
 import io.github.nexalloy.morphe.shared.misc.settings.preference.NonInteractivePreference
@@ -19,26 +16,29 @@ import io.github.nexalloy.morphe.shared.misc.settings.preference.PreferenceScree
 import io.github.nexalloy.morphe.shared.misc.settings.preference.PreferenceScreenPreference.Sorting
 import io.github.nexalloy.morphe.shared.misc.settings.preference.TextPreference
 import io.github.nexalloy.morphe.shared.settings.preferences
+import io.github.nexalloy.patch
 
 @Suppress("UNREACHABLE_CODE")
 val SettingsHook = patch(
     name = "<SettingsHook>",
     description = "Adds settings for ReVanced to YouTube.",
 ) {
-    ::PreferenceFragmentCompat_addPreferencesFromResource.hookMethod(scopedHook(::PreferenceInflater_inflate.member) {
+    ::PreferenceFragmentCompat_addPreferencesFromResource.hookMethod {
+        val settings_fragment = ResourceUtils.getXmlIdentifier("settings_fragment")
+        val settings_fragment_cairo = ResourceUtils.getXmlIdentifier("settings_fragment_cairo")
         before { param ->
-            val context = Utils.getContext()
-            val preferencesName = context.resources.getResourceName(outerParam.args[0] as Int)
-            Logger.printDebug { "addPreferencesFromResource $preferencesName" }
-            if (!preferencesName.contains("settings_fragment")) return@before
-            val xml =
-                if (preferencesName.contains("settings_fragment_cairo")) R.xml.yt_morphe_settings_cairo else R.xml.yt_morphe_settings
+            val xml = when (param.args[0] as Int) {
+                0 -> return@before
+                settings_fragment -> R.xml.yt_morphe_settings
+                settings_fragment_cairo -> R.xml.yt_morphe_settings_cairo
+                else -> return@before
+            }
+
             XposedBridge.invokeOriginalMethod(
-                param.method, param.thisObject, param.args.clone().apply {
-                    this[0] = context.resources.getXml(xml)
-                })
+                param.method, param.thisObject, arrayOf(xml)
+            )
         }
-    })
+    }
 
     val superOnCreate = ::licenseActivitySuperOnCreate.method
     superOnCreate.hookMethod { }

@@ -1,11 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?><!--suppress ALL -->
-<PreferenceCategory xmlns:android="http://schemas.android.com/apk/res/android">
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
     <Preference
-        android:key="morphe_settings"
-        android:title="Morphe">
+        android:title="@string/morphe_settings_title">
         <intent
             android:data="morphe_settings_intent"
             android:targetClass="com.google.android.libraries.social.licenses.LicenseActivity"
             android:targetPackage="com.google.android.youtube" />
     </Preference>
-</PreferenceCategory>
+</PreferenceScreen>
