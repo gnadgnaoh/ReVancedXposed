@@ -1,5 +1,6 @@
 package io.github.nexalloy
 
+import io.github.nexalloy.morphe.google.GoogleDiscoverPatches
 import io.github.nexalloy.morphe.music.YTMusicPatches
 import io.github.nexalloy.morphe.reddit.RedditPatches
 import io.github.nexalloy.morphe.youtube.YouTubePatches
@@ -22,6 +23,7 @@ val appPatchConfigurations = listOf(
     AppPatchInfo("Threads", "com.instagram.barcelona", ThreadsPatches),
     AppPatchInfo("Strava", "com.strava", StravaPatches),
     AppPatchInfo("Facebook", "com.facebook.katana", FacebookPatches),
+    AppPatchInfo("Google (Discover)", "com.google.android.googlequicksearchbox", GoogleDiscoverPatches),
 )
 
 val patchesByPackage = appPatchConfigurations.associate { it.packageName to it.patches }
