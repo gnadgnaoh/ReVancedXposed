@@ -10,5 +10,6 @@
         <item>com.instagram.barcelona</item>
         <item>com.strava</item>
         <item>com.facebook.katana</item>
+        <item>com.google.android.googlequicksearchbox</item>
     </string-array>
 </resources>
