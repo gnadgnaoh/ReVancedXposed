@@ -16,6 +16,7 @@
         <package android:name="com.instagram.barcelona" />
         <package android:name="com.strava" />
         <package android:name="com.facebook.katana" />
+        <package android:name="com.google.android.googlequicksearchbox" />
     </queries>
 
     <application
