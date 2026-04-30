@@ -4,12 +4,16 @@ import io.github.nexalloy.morphe.findMethodDirect
 import io.github.nexalloy.morphe.fingerprint
 import org.luckypray.dexkit.query.enums.StringMatchType
 
-val adPostFingerprint = fingerprint {
-    returns("V")
-    // "children" are present throughout multiple versions
-    strings("children")
-    classMatcher { className(".Listing", StringMatchType.EndsWith) }
+val adPostFingerprint = findMethodDirect {
+    findClass {
+        matcher {
+            className("com.reddit.domain.model.listing.Listing")
+        }
+    }.single().methods
+        .filter { it.isConstructor } 
+        .maxByOrNull { it.paramCount }!!
 }
+
 val AdPostSectionInitFingerprint = findMethodDirect {
     findClass {
         matcher {
