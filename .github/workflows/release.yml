@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - '*.*.*'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -28,19 +29,26 @@ jobs:
       run: chmod +x gradlew
 
     - name: Write key
+      env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          K_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          K_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
       run: |
-        echo KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }} > signing.properties
-        echo KEYSTORE_ALIAS=${{ secrets.KEYSTORE_ALIAS }} >> signing.properties
-        echo KEYSTORE_ALIAS_PASSWORD='${{ secrets.KEYSTORE_ALIAS_PASSWORD }}' >> signing.properties
-        echo KEYSTORE_FILE=../key.jks >> signing.properties
-        echo ${{ secrets.KEYSTORE }} | base64 --decode > key.jks
+          echo "$KEYSTORE_B64" | tr -d '\r\n ' | base64 -d > release.jks
+          
+          printf "KEYSTORE_PASSWORD=%s\n" "$K_PASS" > signing.properties
+          printf "KEYSTORE_ALIAS=%s\n" "$K_ALIAS" >> signing.properties
+          printf "KEYSTORE_ALIAS_PASSWORD=%s\n" "$K_PASS" >> signing.properties
+          printf "KEYSTORE_FILE=../release.jks\n" >> signing.properties
 
     - name: Build Release
       run: ./gradlew assembleRelease
 
     - run: |
-        cd app/build/outputs/apk/release/
-        mv app-release.apk NexAlloy-${{ github.ref_name }}.apk
-        gh release create --prerelease ${{ github.ref_name }} NexAlloy-${{ github.ref_name }}.apk
+          cd app/build/outputs/apk/release/
+          TAG_NAME="v${{ github.run_number }}"
+          mv app-release.apk NexAlloy-${TAG_NAME}.apk
+        
+          gh release create "$TAG_NAME" NexAlloy-${TAG_NAME}.apk --title "Release $TAG_NAME" --prerelease
       env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

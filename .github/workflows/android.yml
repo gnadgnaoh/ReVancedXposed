@@ -2,7 +2,7 @@ name: Android CI
 
 on:
   push:
-    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -27,12 +27,17 @@ jobs:
       run: chmod +x gradlew
 
     - name: Write key
+      env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          K_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          K_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
       run: |
-        echo KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }} > signing.properties
-        echo KEYSTORE_ALIAS=${{ secrets.KEYSTORE_ALIAS }} >> signing.properties
-        echo KEYSTORE_ALIAS_PASSWORD='${{ secrets.KEYSTORE_ALIAS_PASSWORD }}' >> signing.properties
-        echo KEYSTORE_FILE=../key.jks >> signing.properties
-        echo ${{ secrets.KEYSTORE }} | base64 --decode > key.jks
+          echo "$KEYSTORE_B64" | tr -d '\r\n ' | base64 -d > release.jks
+          
+          printf "KEYSTORE_PASSWORD=%s\n" "$K_PASS" > signing.properties
+          printf "KEYSTORE_ALIAS=%s\n" "$K_ALIAS" >> signing.properties
+          printf "KEYSTORE_ALIAS_PASSWORD=%s\n" "$K_PASS" >> signing.properties
+          printf "KEYSTORE_FILE=../release.jks\n" >> signing.properties
 
     - name: Build Debug
       run: ./gradlew assembleDebug
@@ -56,14 +61,23 @@ jobs:
 
     - name: Create AutoBuild Release
       run: |
-        LATEST_REL=$(gh release view --json tagName -q .tagName)
+        LATEST_REL=$(gh release view --json tagName -q .tagName 2>/dev/null || echo "")
         GIT_DESCRIBE=$(git rev-parse --short HEAD)
+        
         cd app/build/outputs/apk/release/
         mv app-release.apk NexAlloy-${GIT_DESCRIBE}.apk
+        
         gh release delete autobuild --yes || true
+        
+        if [ -z "$LATEST_REL" ]; then
+          NOTES="Nightly build from commit ${GIT_DESCRIBE}"
+        else
+          NOTES="Nightly build from commit ${GIT_DESCRIBE}. See changes: https://github.com/${{ github.repository }}/compare/${LATEST_REL}...main"
+        fi
+
         gh release create autobuild NexAlloy-${GIT_DESCRIBE}.apk \
           --prerelease \
           --title "Nightly Build ${GIT_DESCRIBE}" \
-          --notes "Nightly build from commit ${GIT_DESCRIBE}. See changes: https://github.com/${{ github.repository }}/compare/${LATEST_REL}...main"
+          --notes "$NOTES"
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
