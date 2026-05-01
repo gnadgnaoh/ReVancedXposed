@@ -7,14 +7,14 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import io.github.nexalloy.findFirstFieldByExactType
 import io.github.nexalloy.getStaticObjectField
-import io.github.nexalloy.patch
-import io.github.nexalloy.scopedHook
 import io.github.nexalloy.morphe.youtube.shared.VideoQualityClass
 import io.github.nexalloy.morphe.youtube.video.playerresponse.PlayerResponseMethodHook
 import io.github.nexalloy.morphe.youtube.video.playerresponse.playerResponseBeforeVideoIdHooks
 import io.github.nexalloy.morphe.youtube.video.playerresponse.playerResponseVideoIdHooks
 import io.github.nexalloy.morphe.youtube.video.videoid.VideoId
 import io.github.nexalloy.morphe.youtube.video.videoid.videoIdHooks
+import io.github.nexalloy.patch
+import io.github.nexalloy.scopedHook
 import java.lang.ref.WeakReference
 import java.lang.reflect.Field
 import java.lang.reflect.Method
@@ -123,7 +123,7 @@ val VideoInformationPatch = patch(
     }
     //endregion
 
-    ::videoLengthFingerprint.hookMethod {
+    VideoLengthFingerprint.hookMethod {
         val videoLengthField = ::videoLengthField.field
         val videoLengthHolderField = ::videoLengthHolderField.field
 

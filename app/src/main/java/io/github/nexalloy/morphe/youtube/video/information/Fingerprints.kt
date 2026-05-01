@@ -4,6 +4,7 @@ import io.github.nexalloy.SkipTest
 import io.github.nexalloy.morphe.AccessFlags
 import io.github.nexalloy.morphe.Fingerprint
 import io.github.nexalloy.morphe.Opcode
+import io.github.nexalloy.morphe.OpcodesFilter
 import io.github.nexalloy.morphe.findClassDirect
 import io.github.nexalloy.morphe.findFieldDirect
 import io.github.nexalloy.morphe.findMethodDirect
@@ -117,30 +118,28 @@ val seekSourceType = findClassDirect {
     seekFingerprint().paramTypes[1]
 }
 
-val videoLengthFingerprint = fingerprint {
-    opcodes(
+internal object VideoLengthFingerprint : Fingerprint(
+    filters = OpcodesFilter.opcodesToFilters(
         Opcode.MOVE_RESULT_WIDE,
         Opcode.CMP_LONG,
         Opcode.IF_LEZ,
         Opcode.IGET_OBJECT,
         Opcode.CHECK_CAST,
-        Opcode.INVOKE_VIRTUAL,
+    ) + OpcodesFilter.opcodesToFilters(
         Opcode.MOVE_RESULT_WIDE,
         Opcode.GOTO,
         Opcode.INVOKE_VIRTUAL,
-        Opcode.MOVE_RESULT_WIDE,
-        Opcode.CONST_4,
-        Opcode.INVOKE_VIRTUAL,
+        Opcode.MOVE_RESULT_WIDE
     )
-}
+)
 
 val videoLengthField = findFieldDirect {
-    videoLengthFingerprint().usingFields.single { it.usingType == FieldUsingType.Write && it.field.typeName == "long" }.field
+    VideoLengthFingerprint().usingFields.single { it.usingType == FieldUsingType.Write && it.field.typeName == "long" }.field
 }
 
 val videoLengthHolderField = findFieldDirect {
     val videoLengthField = videoLengthField()
-    videoLengthFingerprint().usingFields.single { it.usingType == FieldUsingType.Read && it.field.typeName == videoLengthField.declaredClassName }.field
+    VideoLengthFingerprint().usingFields.single { it.usingType == FieldUsingType.Read && it.field.typeName == videoLengthField.declaredClassName }.field
 }
 
 /**
