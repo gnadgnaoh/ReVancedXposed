@@ -12,14 +12,17 @@ import java.lang.reflect.Modifier
  *
  * Hooks:
  *  - List-builder append/factory       → strips ad stories via [AdStoryInspector]
+ *    (AND-logic: adKind + reelsSignal token để tránh false-positive Reels carousel) [UPDATED]
  *  - FbShorts plugin pack              → returns empty list for ad-backed stories
- *  - InstreamBannerEligibility         → disables idle banner ads in Reels player      [NEW]
- *  - IndicatorPillAdEligibility        → disables floating CTA overlay (ReelsAdsFloatingCtaPlugin) [NEW]
+ *  - InstreamBannerEligibility         → disables idle banner ads in Reels player
+ *  - IndicatorPillAdEligibility        → disables floating CTA overlay (ReelsAdsFloatingCtaPlugin)
+ *  - ReelsBannerAdsComponent render    → returns null để ẩn banner Litho component [NEW]
  *  - Feed CSR cache filters            → strips sponsored feed items via [FeedItemInspector]
  *  - Late-stage feed sanitizers        → removes sponsored items from storage callbacks
- *    (bao gồm FbShortsCSRStorageLifecycle)                                              [NEW]
- *  - Story pool coordinators           → blocks sponsored items from entering pool
- *    (bao gồm FeedStoryPoolCoordinator)                                                 [NEW]
+ *    (bao gồm FbShortsCSRStorageLifecycle)
+ *  - Story pool coordinators           → blocks DEFINITELY sponsored items from pool
+ *    sử dụng isDefinitelySponsoredFeedItem() (strict, không scan token) [UPDATED]
+ *    (bao gồm FeedStoryPoolCoordinator)
  *  - Sponsored pool (add / next)       → no-ops pool add; returns null for next()
  *  - Sponsored pool list/result methods→ return empty collections
  *  - Story ad providers (data source + in-disc) → suppress merge, fetch, deferred, insertion
@@ -87,8 +90,6 @@ val HideAds = patch(
     // ── InstreamAdIdleWithBannerState ─────────────────────────────────────────
     // Chặn banner ads hiển thị khi Reels player ở trạng thái idle.
     // Hook → luôn trả về false (ineligible) để tắt banner.
-    //
-    // Nguồn: Patches.kt hookInstreamBannerEligibility
 
     ::instreamBannerEligibilityFingerprint.memberOrNull?.let { method ->
         XposedBridge.hookMethod(method, XC_MethodReplacement.returnConstant(false))
@@ -98,13 +99,38 @@ val HideAds = patch(
     // ── IndicatorPillAdEligibility (ReelsAdsFloatingCtaPlugin) ───────────────
     // Chặn floating CTA overlay xuất hiện khi xem Reels ads.
     // Method: static boolean(?, ?, ?) → hook → false.
-    //
-    // Nguồn: Patches.kt hookIndicatorPillAdEligibility
 
     ::indicatorPillAdEligibilityFingerprint.memberOrNull?.let { method ->
         XposedBridge.hookMethod(method, XC_MethodReplacement.returnConstant(false))
         Logger.printDebug { "FB Ads: hooked indicator pill ad eligibility → false" }
     }
+
+    // ── ReelsBannerAdsComponent / ReelsBannerAdsNativeComponent render ────────
+    // Ẩn banner ads được render trực tiếp qua Litho component tree trong Reels player.
+    // Hook render() → return null để component không render ra gì.
+    //
+    // Bổ sung cho instreamBannerEligibility (chặn từ nguồn) — bắt các banner
+    // đi qua path khác (ví dụ: native component thay vì state machine).
+    //
+    // Source: Patches.kt resolveReelsBannerRenderMethods + hookReelsBannerRender [NEW]
+
+    ::reelsBannerRenderFingerprints.dexMethodList
+        .mapNotNull { runCatching { it.toMethod() }.getOrNull() }
+        .filter { !Modifier.isAbstract(it.modifiers) && !it.declaringClass.isInterface }
+        .distinctBy { "${it.declaringClass.name}.${it.name}" }
+        .forEach { method ->
+            runCatching {
+                method.hookMethod {
+                    before { param ->
+                        param.result = null
+                        Logger.printDebug { "FB Ads: blocked Reels banner render (${method.declaringClass.simpleName}.${method.name})" }
+                    }
+                }
+                Logger.printDebug { "FB Ads: hooked Reels banner render ${method.declaringClass.name}.${method.name}" }
+            }.onFailure {
+                Logger.printDebug { "FB Ads: failed to hook Reels banner render ${method.declaringClass.name}.${method.name}: $it" }
+            }
+        }
 
     // ── CSR cache filters ─────────────────────────────────────────────────────
 
@@ -173,7 +199,7 @@ val HideAds = patch(
     }
 
     // CSR storage lifecycle — ImmutableList is arg index 2
-    // Bao gồm FbShortsCSRStorageLifecycle (thêm mới từ Patches.kt)
+    // Bao gồm FbShortsCSRStorageLifecycle
     ::lateFeedStorageLifecycleFingerprints.dexMethodList
         .mapNotNull { runCatching { it.toMethod() }.getOrNull() }
         .filter { !Modifier.isAbstract(it.modifiers) && !it.declaringClass.isInterface }
@@ -191,14 +217,18 @@ val HideAds = patch(
         }
 
     // ── Story pool coordinators ───────────────────────────────────────────────
-    // Bao gồm FeedStoryPoolCoordinator (thêm mới từ Patches.kt)
+    // Sử dụng isDefinitelySponsoredFeedItem() (strict) thay vì isSponsoredFeedItem()
+    // để tránh false-positive với organic Reels carousels (FB_SHORTS category).
+    // Bao gồm FeedStoryPoolCoordinator
+    //
+    // Source: Patches.kt hookStoryPoolAdd — upgraded to isDefinitelySponsoredFeedItem() [UPDATED]
 
     storyPoolAddMethods.forEach { method ->
         method.hookMethod {
             before { param ->
-                if (!feedItemInspector.isSponsoredFeedItem(param.args.getOrNull(0))) return@before
+                if (!feedItemInspector.isDefinitelySponsoredFeedItem(param.args.getOrNull(0))) return@before
                 param.result = false
-                Logger.printDebug { "FB Ads: blocked sponsored item from story pool (${method.declaringClass.simpleName})" }
+                Logger.printDebug { "FB Ads: blocked definitely-sponsored item from story pool (${method.declaringClass.simpleName})" }
             }
         }
     }

@@ -140,8 +140,6 @@ val pluginPackMethodFingerprint = findMethodDirect {
  *
  * Tìm class chứa string "InstreamAdIdleWithBannerState", lấy method boolean()
  * không tham số, không static. Hook → return false để tắt banner.
- *
- * Source: Patches.kt resolveInstreamBannerEligibilityMethod
  */
 val instreamBannerEligibilityFingerprint = findMethodDirect {
     findClass {
@@ -173,8 +171,6 @@ val instreamBannerEligibilityFingerprint = findMethodDirect {
  *   - "IndicatorPillComponent.render"
  *   - "com.facebook.feedback.comments.plugins.indicatorpill.reelsadsfloatingcta.ReelsAdsFloatingCtaPlugin"
  * rồi lấy static boolean method có 3 tham số. Hook → return false.
- *
- * Source: Patches.kt resolveIndicatorPillAdEligibilityMethod
  */
 val indicatorPillAdEligibilityFingerprint = findMethodDirect {
     findClass {
@@ -193,6 +189,41 @@ val indicatorPillAdEligibilityFingerprint = findMethodDirect {
             }
         }.firstOrNull()
     }.first()
+}
+
+/**
+ * ReelsBannerAdsComponent / ReelsBannerAdsNativeComponent — Litho render method.
+ *
+ * Hook render() → return null để ẩn banner ads component trong Reels player.
+ * Điều này loại bỏ banner ads được render trực tiếp qua Litho component tree,
+ * bổ sung cho instreamBannerEligibility (chặn từ nguồn) và CSR filter (chặn từ list).
+ *
+ * Tìm class có string "ReelsBannerAdsComponent" hoặc "ReelsBannerAdsNativeComponent",
+ * rồi lấy render method: non-static, non-bridge, 1 param, return type gán được cho class.
+ *
+ * Source: Patches.kt resolveReelsBannerRenderMethods + resolveLithoRenderMethod [NEW]
+ */
+val reelsBannerRenderFingerprints = findMethodListDirect {
+    val results = LinkedHashMap<String, org.luckypray.dexkit.result.MethodData>()
+
+    listOf("ReelsBannerAdsComponent", "ReelsBannerAdsNativeComponent").forEach { componentName ->
+        findClass {
+            matcher { usingStrings(componentName) }
+        }.forEach { cls ->
+            // Lấy Litho render method: non-static, non-bridge, 1 param, return type assignable from class
+            cls.findMethod {
+                matcher {
+                    paramCount = 1
+                    returnType = cls.name
+                }
+            }.filter { m ->
+                !Modifier.isStatic(m.modifiers)
+            }.forEach { m ->
+                results.putIfAbsent("${cls.name}.${m.name}", m)
+            }
+        }
+    }
+    results.values.toList()
 }
 
 // ─── Feed CSR filter ──────────────────────────────────────────────────────────
@@ -274,7 +305,7 @@ val lateFeedVendingFingerprint = findMethodDirect {
  *  - CSRNoOpStorageLifecycleImpl
  *  - FeedCSRStorageLifecycle
  *  - FriendlyFeedCSRStorageLifecycle
- *  - FbShortsCSRStorageLifecycle  ← thêm mới từ Patches.kt
+ *  - FbShortsCSRStorageLifecycle
  */
 val lateFeedStorageLifecycleFingerprints = findMethodListDirect {
     val results = LinkedHashMap<String, org.luckypray.dexkit.result.MethodData>()
@@ -317,9 +348,8 @@ val lateFeedStorageLifecycleFingerprints = findMethodListDirect {
 
 /**
  * CSRStoryPoolCoordinator + FeedStoryPoolCoordinator — boolean add(item).
- * Hooked to return false (block) when item is a sponsored feed item.
- *
- * FeedStoryPoolCoordinator thêm mới từ Patches.kt.
+ * Hooked to return false (block) when item is a definitely sponsored feed item.
+ * Sử dụng isDefinitelySponsoredFeedItem() (strict) để tránh false-positive Reels carousel.
  */
 val storyPoolAddFingerprints = findMethodListDirect {
     val results = LinkedHashMap<String, org.luckypray.dexkit.result.MethodData>()

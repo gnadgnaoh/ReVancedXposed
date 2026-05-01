@@ -58,7 +58,7 @@ val GAME_AD_METHOD_TAGS = listOf(
 
 /**
  * Enum values recognized as sponsored/ad categories.
- * "BANNER" và "ADVERTISEMENT" được thêm mới để bắt các dạng banner ads trong Reels.
+ * "BANNER" and "ADVERTISEMENT" catch banner ads in Reels.
  */
 private val FEED_AD_CATEGORY_VALUES = setOf(
     "SPONSORED",
@@ -69,16 +69,16 @@ private val FEED_AD_CATEGORY_VALUES = setOf(
 )
 
 /**
- * Token nhận diện quảng cáo qua string scanning.
- * Các token banner mới (từ Patches.kt) dùng để bắt:
- *  - reels_banner_ad / reelsbannerads      → banner slot CSR trong Reels (ảnh 1)
- *  - instream_legacy_banner_ad             → banner dạng legacy instream
- *  - instreamadidlewithbannerstate         → idle state banner (InstreamAdIdleWithBannerState)
- *  - unified_player_banner_ad              → banner trong unified player
- *  - reels_post_loop_deferred_card         → deferred card sau vòng lặp Reels
- *  - deferred_card / adbreakdeferredcta    → deferred CTA overlay
- *  - floatingcta                           → floating CTA button (ReelsAdsFloatingCta)
- *  - banner_ad_                            → prefix chung cho các loại banner
+ * Safe container categories that should never be filtered (e.g. organic Reels carousels).
+ * Source: Patches.kt FEED_SAFE_CONTAINER_CATEGORY_VALUES [NEW]
+ */
+private val FEED_SAFE_CONTAINER_CATEGORY_VALUES = setOf(
+    "FB_SHORTS",
+    "MULTI_FB_STORIES_TRAY"
+)
+
+/**
+ * Token nhận diện quảng cáo qua string scanning cho feed items.
  */
 private val FEED_AD_SIGNAL_TOKENS = listOf(
     "sponsored",
@@ -98,15 +98,23 @@ private val FEED_AD_SIGNAL_TOKENS = listOf(
 )
 
 /**
- * Method names thực sự tồn tại trong dex Facebook với ý nghĩa kỹ thuật.
- * Phân tích từ dex thực tế — chỉ những tên này mới không bị obfuscate.
- * (Tất cả field names đều bị obfuscate thành A00, A01... nên không scan fields)
+ * Token nhận diện quảng cáo dành riêng cho Reels story objects.
+ * Tách riêng khỏi FEED_AD_SIGNAL_TOKENS để tránh false-positive với
+ * reels_post_loop_deferred_card / deferred_card / floatingcta (organic content).
+ * Source: Patches.kt REELS_AD_SIGNAL_TOKENS [NEW]
  */
-private val SAFE_STRING_METHOD_NAMES = setOf(
-    "getTypeName",      // GraphQLFeedUnitEdge, GraphQLStory, GraphQLFBMultiAdsFeedUnit...
-    "getCacheId",       // GraphQLStory, GraphQLQuickPromotionNativeTemplateFeedUnit...
-    "getDebugInfo",     // GraphQLStory, GraphQLFBMultiAdsFeedUnit...
-    "getAnalyticsName", // FbShorts fragment classes
+private val REELS_AD_SIGNAL_TOKENS = listOf(
+    "sponsored",
+    "promotion",
+    "multiads",
+    "quickpromotion",
+    "reels_banner_ad",
+    "reelsbannerads",
+    "adbreakdeferredcta",
+    "instreamadidlewithbannerstate",
+    "instream_legacy_banner_ad",
+    "unified_player_banner_ad",
+    "banner_ad_"
 )
 
 private val gameAdInstanceIds = ConcurrentHashMap<String, String>()
@@ -114,15 +122,36 @@ private val gameAdInstanceIds = ConcurrentHashMap<String, String>()
 // ─── AdStoryInspector ─────────────────────────────────────────────────────────
 
 /**
- * Inspects arbitrary feed-story objects to detect whether they contain an AD enum value.
- * Used to filter the raw list-builder output that backs the Reels / home-feed.
+ * Inspects arbitrary feed-story objects to detect ad-backed stories.
+ *
+ * Nâng cấp từ Patches.kt:
+ *  - Dùng logic AND: containsAdKind() AND containsReelsAdSignal() để giảm false-positive
+ *    với organic Reels carousels. Story chỉ bị lọc khi vừa có AD enum VÀ có signal token.
+ *  - Tách riêng REELS_AD_SIGNAL_TOKENS (bộ token nhỏ hơn, chặt hơn).
+ *  - Thêm stringMethodsFor() để scan String-returning methods trực tiếp.
  */
 class AdStoryInspector(private val adKindEnumClass: Class<*>) {
 
     private val enumMethodCache = ConcurrentHashMap<Class<*>, List<Method>>()
     private val fieldCache = ConcurrentHashMap<Class<*>, List<Field>>()
+    private val stringMethodCache = ConcurrentHashMap<Class<*>, List<Method>>()
 
+    /**
+     * Returns true only when the object BOTH contains an AD enum value
+     * AND contains a known Reels ad signal token. The AND condition prevents
+     * organic Reels carousels (which sometimes contain AD-like enum values for
+     * unrelated reasons) from being incorrectly filtered.
+     */
     fun containsAdStory(
+        value: Any?,
+        depth: Int = 0,
+        seen: IdentityHashMap<Any, Boolean> = IdentityHashMap()
+    ): Boolean {
+        return containsAdKind(value, depth, seen) &&
+            containsReelsAdSignal(value, 0, IdentityHashMap())
+    }
+
+    private fun containsAdKind(
         value: Any?,
         depth: Int = 0,
         seen: IdentityHashMap<Any, Boolean> = IdentityHashMap()
@@ -139,7 +168,7 @@ class AdStoryInspector(private val adKindEnumClass: Class<*>) {
         if (value is Iterable<*>) {
             var checked = 0
             for (item in value) {
-                if (containsAdStory(item, depth + 1, seen)) return true
+                if (containsAdKind(item, depth + 1, seen)) return true
                 if (++checked >= 8) break
             }
         }
@@ -148,7 +177,7 @@ class AdStoryInspector(private val adKindEnumClass: Class<*>) {
             if (array != null) {
                 var checked = 0
                 for (item in array) {
-                    if (containsAdStory(item, depth + 1, seen)) return true
+                    if (containsAdKind(item, depth + 1, seen)) return true
                     if (++checked >= 8) break
                 }
             }
@@ -157,13 +186,61 @@ class AdStoryInspector(private val adKindEnumClass: Class<*>) {
             if (isAdKind(runCatching { method.invoke(value) }.getOrNull())) return true
         }
         for (field in fieldsFor(type)) {
-            if (containsAdStory(runCatching { field.get(value) }.getOrNull(), depth + 1, seen)) return true
+            if (containsAdKind(runCatching { field.get(value) }.getOrNull(), depth + 1, seen)) return true
+        }
+        return false
+    }
+
+    private fun containsReelsAdSignal(
+        value: Any?,
+        depth: Int,
+        seen: IdentityHashMap<Any, Boolean>
+    ): Boolean {
+        if (value == null || depth > 4) return false
+
+        if (value is CharSequence) return isReelsAdSignalText(value.toString())
+
+        val type = value.javaClass
+        if (isReelsAdSignalText(type.name)) return true
+        if (type.isEnum) return isReelsAdSignalText(value.toString())
+        if (type.isPrimitive || value is Number || value is Boolean) return false
+        if (seen.put(value, true) != null) return false
+
+        if (value is Iterable<*>) {
+            var checked = 0
+            for (item in value) {
+                if (containsReelsAdSignal(item, depth + 1, seen)) return true
+                if (++checked >= 8) break
+            }
+        }
+        if (type.isArray) {
+            val array = value as? Array<*>
+            if (array != null) {
+                var checked = 0
+                for (item in array) {
+                    if (containsReelsAdSignal(item, depth + 1, seen)) return true
+                    if (++checked >= 8) break
+                }
+            }
+        }
+        if (isReelsAdSignalText(runCatching { value.toString() }.getOrNull())) return true
+        for (method in stringMethodsFor(type)) {
+            if (isReelsAdSignalText(runCatching { method.invoke(value) as? String }.getOrNull())) return true
+        }
+        for (field in fieldsFor(type)) {
+            if (containsReelsAdSignal(runCatching { field.get(value) }.getOrNull(), depth + 1, seen)) return true
         }
         return false
     }
 
     private fun isAdKind(value: Any?) =
         value != null && value.javaClass == adKindEnumClass && value.toString() == "AD"
+
+    private fun isReelsAdSignalText(value: String?): Boolean {
+        if (value.isNullOrBlank()) return false
+        val normalized = value.lowercase()
+        return REELS_AD_SIGNAL_TOKENS.any { token -> normalized.contains(token) }
+    }
 
     private fun enumMethodsFor(type: Class<*>): List<Method> = enumMethodCache.getOrPut(type) {
         val methods = LinkedHashMap<String, Method>()
@@ -194,6 +271,23 @@ class AdStoryInspector(private val adKindEnumClass: Class<*>) {
         }
         fields
     }
+
+    private fun stringMethodsFor(type: Class<*>): List<Method> = stringMethodCache.getOrPut(type) {
+        val methods = LinkedHashMap<String, Method>()
+        var cur: Class<*>? = type
+        while (cur != null && cur != Any::class.java) {
+            cur.declaredMethods.forEach { m ->
+                if (!Modifier.isStatic(m.modifiers) && m.parameterCount == 0 &&
+                    m.returnType == String::class.java && m.name != "toString"
+                ) {
+                    m.isAccessible = true
+                    methods.putIfAbsent("${cur!!.name}#${m.name}", m)
+                }
+            }
+            cur = cur.superclass
+        }
+        methods.values.take(12).toList()
+    }
 }
 
 // ─── FeedItemInspector ────────────────────────────────────────────────────────
@@ -201,11 +295,15 @@ class AdStoryInspector(private val adKindEnumClass: Class<*>) {
 /**
  * Inspects CSR-filtered feed items to detect sponsored/promoted/banner content.
  *
- * Được nâng cấp với:
- *  - [FEED_AD_CATEGORY_VALUES] bổ sung "BANNER", "ADVERTISEMENT"
- *  - [FEED_AD_SIGNAL_TOKENS] để scan chuỗi nhận diện banner ads mới
- *  - [containsKnownAdSignals] quét String fields/methods của item
- *  - [isAdSignalText] kiểm tra token trong chuỗi bất kỳ
+ * Nâng cấp từ Patches.kt:
+ *  - Thêm [isDefinitelySponsoredFeedItem] — strict check chỉ dùng category/class/typeName,
+ *    không scan string tokens. Dùng cho storyPoolAdd để giảm false-positive Reels carousel.
+ *  - Thêm [FEED_SAFE_CONTAINER_CATEGORY_VALUES] — sớm trả về false khi category là FB_SHORTS
+ *    hay MULTI_FB_STORIES_TRAY để bảo vệ organic Reels.
+ *  - Thêm [stringFieldsFor] — scan String fields thực sự của object (bổ sung cho string methods).
+ *  - Thêm [cachedMethod] helper thread-safe cho ConcurrentHashMap caching.
+ *  - Thêm [describe] — log helper cho debug.
+ *  - Bỏ filter SAFE_STRING_METHOD_NAMES: scan toàn bộ String methods/fields thay vì whitelist.
  */
 class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
 
@@ -213,45 +311,74 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
     private val itemEdgeAccessor = resolveItemEdgeAccessor(itemContractTypes)
     private val itemNetworkAccessor = resolveItemNetworkAccessor(itemContractTypes)
 
-    // Must be HashMap (not ConcurrentHashMap): CHM throws NPE on null values.
-    // Concurrent writes are safe — same Class always resolves to the same Method?.
-    private val categoryMethodCache = HashMap<Class<*>, Method?>()
-    private val edgeAccessorCache = HashMap<Class<*>, Method?>()
-    private val feedUnitAccessorCache = HashMap<Class<*>, Method?>()
-    private val typeNameMethodCache = HashMap<Class<*>, Method?>()
-
-    // String-scanning caches — used by [containsKnownAdSignals]
+    private val categoryMethodCache = ConcurrentHashMap<Class<*>, Method>()
+    private val edgeAccessorCache = ConcurrentHashMap<Class<*>, Method>()
+    private val feedUnitAccessorCache = ConcurrentHashMap<Class<*>, Method>()
+    private val typeNameMethodCache = ConcurrentHashMap<Class<*>, Method>()
     private val stringAccessorCache = ConcurrentHashMap<Class<*>, List<Method>>()
+    private val stringFieldCache = ConcurrentHashMap<Class<*>, List<Field>>()
 
+    /**
+     * Full sponsored check: category + class name + type name + string signal scan.
+     * Dùng cho CSR filter, late-stage sanitizer.
+     */
     fun isSponsoredFeedItem(value: Any?): Boolean {
+        if (isDefinitelySponsoredFeedItem(value)) return true
+
+        // String-signal scan on all layers (catches banner/deferred-card/floatingCTA)
+        if (containsKnownAdSignals(value)) return true
+        if (containsKnownAdSignals(invokeNoThrow(itemModelAccessor, value))) return true
+        val edge = edgeFrom(value)
+        if (containsKnownAdSignals(edge)) return true
+        if (containsKnownAdSignals(feedUnitFrom(edge))) return true
+
+        return false
+    }
+
+    /**
+     * Strict sponsored check: only category enum, known ad class names, and type name.
+     * Does NOT scan string tokens to avoid false-positives with organic Reels carousels.
+     * Dùng cho storyPoolAdd hook (nguồn: Patches.kt hookStoryPoolAdd).
+     */
+    fun isDefinitelySponsoredFeedItem(value: Any?): Boolean {
         if (value == null) return false
 
-        // 1. Category check via model accessor
-        if (isSponsoredFeedCategory(readCategory(invokeNoThrow(itemModelAccessor, value)))) return true
+        val model = invokeNoThrow(itemModelAccessor, value)
+        val modelCategory = readCategory(model)
+        if (isSafeFeedContainerCategory(modelCategory)) return false
+        if (isSponsoredFeedCategory(modelCategory)) return true
 
-        // 2. Category check via edge
         val edge = edgeFrom(value)
-        if (isSponsoredFeedCategory(readCategory(edge))) return true
+        val edgeCategory = readCategory(edge)
+        if (isSafeFeedContainerCategory(edgeCategory)) return false
+        if (isSponsoredFeedCategory(edgeCategory)) return true
 
-        // 3. Known ad unit class names
         val feedUnit = feedUnitFrom(edge)
         val unitClassName = feedUnit?.javaClass?.name
         if (unitClassName == GRAPHQL_MULTI_ADS_FEED_UNIT_CLASS ||
             unitClassName == GRAPHQL_QUICK_PROMO_FEED_UNIT_CLASS
         ) return true
 
-        // 4. Type name heuristics (QuickPromotion, banner signals)
         val typeName = readTypeName(feedUnit)
         if (isLikelyAdTypeName(typeName) || isAdSignalText(unitClassName)) return true
 
-        // 5. String-signal scan on all layers (catches banner/deferred-card/floatingCTA)
-        // Chỉ scan metadata/technical fields — bỏ qua text content người dùng
-        if (containsKnownAdSignals(value)) return true
-        if (containsKnownAdSignals(invokeNoThrow(itemModelAccessor, value))) return true
-        if (containsKnownAdSignals(edge)) return true
-        if (containsKnownAdSignals(feedUnit)) return true
-
         return false
+    }
+
+    /**
+     * Debug description of a feed item.
+     */
+    fun describe(item: Any?): String {
+        if (item == null) return "null"
+        val edge = edgeFrom(item)
+        val feedUnit = feedUnitFrom(edge)
+        val category = readCategory(invokeNoThrow(itemModelAccessor, item))
+            ?: readCategory(edge)
+            ?: "unknown"
+        val network = invokeNoThrow(itemNetworkAccessor, item)?.toString() ?: "unknown"
+        val unitClass = feedUnit?.javaClass?.name ?: "null"
+        val typeName = readTypeName(feedUnit) ?: "unknown"
+        return "cat=$category isAd=${isSponsoredFeedItem(item)} network=$network wrapper=${item.javaClass.name} unit=$unitClass type=$typeName"
     }
 
     private fun edgeFrom(value: Any?): Any? {
@@ -260,7 +387,7 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
         invokeNoThrow(itemEdgeAccessor, value)
             ?.takeIf { it.javaClass.name == GRAPHQL_FEED_UNIT_EDGE_CLASS }
             ?.let { return it }
-        val fallback = edgeAccessorCache.getOrPut(value.javaClass) {
+        val fallback = cachedMethod(edgeAccessorCache, value.javaClass) {
             resolveChildAccessor(value) { it != null && it.javaClass.name == GRAPHQL_FEED_UNIT_EDGE_CLASS }
         }
         return invokeNoThrow(fallback, value)
@@ -268,7 +395,7 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
 
     private fun feedUnitFrom(edge: Any?): Any? {
         if (edge == null) return null
-        val accessor = feedUnitAccessorCache.getOrPut(edge.javaClass) {
+        val accessor = cachedMethod(feedUnitAccessorCache, edge.javaClass) {
             resolveChildAccessor(edge) { v ->
                 val n = v?.javaClass?.name
                 n == GRAPHQL_MULTI_ADS_FEED_UNIT_CLASS ||
@@ -282,7 +409,7 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
     private fun readCategory(value: Any?): String? {
         if (value == null) return null
         if (value.javaClass.isEnum) return value.toString()
-        val accessor = categoryMethodCache.getOrPut(value.javaClass) {
+        val accessor = cachedMethod(categoryMethodCache, value.javaClass) {
             allInstanceMethods(value.javaClass).firstOrNull { m ->
                 m.parameterCount == 0 && m.returnType.isEnum &&
                     m.returnType.enumConstants?.any { c ->
@@ -295,12 +422,27 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
 
     private fun readTypeName(value: Any?): String? {
         if (value == null) return null
-        val accessor = typeNameMethodCache.getOrPut(value.javaClass) {
+        val accessor = cachedMethod(typeNameMethodCache, value.javaClass) {
             allInstanceMethods(value.javaClass).firstOrNull { m ->
                 m.parameterCount == 0 && m.returnType == String::class.java && m.name == "getTypeName"
             }?.apply { isAccessible = true }
         }
         return invokeNoThrow(accessor, value) as? String
+    }
+
+    /**
+     * Thread-safe nullable method cache helper.
+     * Avoids repeated reflection on the same class even when the result is null.
+     * Source: Patches.kt cachedMethod [NEW]
+     */
+    private fun cachedMethod(
+        cache: ConcurrentHashMap<Class<*>, Method>,
+        type: Class<*>,
+        resolver: () -> Method?
+    ): Method? {
+        cache[type]?.let { return it }
+        val resolved = resolver() ?: return null
+        return cache.putIfAbsent(type, resolved) ?: resolved
     }
 
     private fun resolveItemModelAccessor(types: Collection<Class<*>>) =
@@ -345,6 +487,9 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
     private fun isSponsoredFeedCategory(v: String?) =
         v != null && v in FEED_AD_CATEGORY_VALUES
 
+    private fun isSafeFeedContainerCategory(v: String?) =
+        v != null && v in FEED_SAFE_CONTAINER_CATEGORY_VALUES
+
     private fun isLikelyAdTypeName(value: String?): Boolean {
         if (value == null) return false
         if (value.contains("QuickPromotion", ignoreCase = true)) return true
@@ -358,9 +503,13 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
         if (isAdSignalText(type.name)) return true
         if (type.isEnum) return isAdSignalText(value.toString())
         if (type.isPrimitive || value is Number || value is Boolean) return false
+        if (isAdSignalText(runCatching { value.toString() }.getOrNull())) return true
         for (method in stringAccessorsFor(type)) {
-            if (method.name !in SAFE_STRING_METHOD_NAMES) continue
             if (isAdSignalText(invokeNoThrow(method, value) as? String)) return true
+        }
+        // Scan String fields directly (nguồn: Patches.kt stringFieldsFor [NEW])
+        for (field in stringFieldsFor(type)) {
+            if (isAdSignalText(runCatching { field.get(value) as? String }.getOrNull())) return true
         }
         return false
     }
@@ -379,11 +528,26 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
                 .toList()
         }
 
-
     /**
-     * Kiểm tra chuỗi có chứa bất kỳ token nào trong [FEED_AD_SIGNAL_TOKENS].
-     * So sánh lowercase để tránh case-sensitivity.
+     * Scan non-static String fields directly — catches obfuscated fields that have no accessor.
+     * Source: Patches.kt stringFieldsFor [NEW]
      */
+    private fun stringFieldsFor(type: Class<*>): List<Field> =
+        stringFieldCache.getOrPut(type) {
+            val fields = ArrayList<Field>()
+            var cur: Class<*>? = type
+            while (cur != null && cur != Any::class.java && fields.size < 12) {
+                cur.declaredFields.forEach { f ->
+                    if (!Modifier.isStatic(f.modifiers) && f.type == String::class.java && fields.size < 12) {
+                        f.isAccessible = true
+                        fields.add(f)
+                    }
+                }
+                cur = cur.superclass
+            }
+            fields
+        }
+
     private fun isAdSignalText(value: String?): Boolean {
         if (value.isNullOrBlank()) return false
         val normalized = value.lowercase()
