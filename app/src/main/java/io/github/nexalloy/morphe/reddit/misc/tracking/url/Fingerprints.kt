@@ -1,18 +1,13 @@
 package io.github.nexalloy.morphe.reddit.misc.tracking.url
 
 import io.github.nexalloy.morphe.findMethodDirect
+import org.luckypray.dexkit.wrap.DexMethod
 
 val shareLinkFormatterFingerprint = findMethodDirect {
     findMethod {
         matcher {
-            returnType = "java.lang.String"
-            paramTypes("java.lang.String", null)
-            usingEqStrings(
-                "url",
-                "getQueryParameterNames(...)",
-                "getQueryParameters(...)",
-                "toString(...)"
-            )
+            usingStrings("share_id", "https://www.reddit.com")
+            paramCount(4)
         }
     }.single()
 }
