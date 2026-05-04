@@ -1,19 +1,15 @@
 package io.github.nexalloy.revanced.facebook.ad
 
 import android.os.Bundle
-import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import io.github.nexalloy.patch
 import io.github.nexalloy.revanced.facebook.AdStoryInspector
+import io.github.nexalloy.revanced.facebook.AUDIENCE_NETWORK_ACTIVITY_CLASS
+import io.github.nexalloy.revanced.facebook.AUDIENCE_NETWORK_REMOTE_ACTIVITY_CLASS
 import io.github.nexalloy.revanced.facebook.FB_TAG
 import io.github.nexalloy.revanced.facebook.FeedItemInspector
 import io.github.nexalloy.revanced.facebook.FeedListSanitizerHook
-import io.github.nexalloy.revanced.facebook.GAME_AD_MESSAGE_TYPES
-import io.github.nexalloy.revanced.facebook.buildGameAdSuccessPayload
-import io.github.nexalloy.revanced.facebook.buildImmutableListLike
-import io.github.nexalloy.revanced.facebook.extractFeedItemsFromResult
-import io.github.nexalloy.revanced.facebook.extractPromiseId
-import io.github.nexalloy.revanced.facebook.filterAdItems
+import io.github.nexalloy.revanced.facebook.NEKO_PLAYABLE_ACTIVITY_CLASS
 import io.github.nexalloy.revanced.facebook.hookFeedCsrFilterInput
 import io.github.nexalloy.revanced.facebook.hookGameAdActivityLaunchFallbacks
 import io.github.nexalloy.revanced.facebook.hookGameAdBridge
@@ -33,77 +29,77 @@ import io.github.nexalloy.revanced.facebook.hookSponsoredPoolResultMethods
 import io.github.nexalloy.revanced.facebook.hookSponsoredStoryNext
 import io.github.nexalloy.revanced.facebook.hookStoryAdProvider
 import io.github.nexalloy.revanced.facebook.hookStoryPoolAdd
-import io.github.nexalloy.revanced.facebook.NEKO_PLAYABLE_ACTIVITY_CLASS
-import io.github.nexalloy.revanced.facebook.AUDIENCE_NETWORK_ACTIVITY_CLASS
-import io.github.nexalloy.revanced.facebook.AUDIENCE_NETWORK_REMOTE_ACTIVITY_CLASS
-import io.github.nexalloy.revanced.facebook.replaceFeedItemsInResult
 import io.github.nexalloy.revanced.facebook.resolveLithoRenderMethod
 import io.github.nexalloy.revanced.facebook.resolveStoryAdProviderHooks
-import java.lang.reflect.Modifier
-import java.lang.reflect.Method
-import org.json.JSONObject
 
 /**
- * Master patch that ports all FacebookAppAdsRemover hooks into the NexAlloy framework.
+ * Master patch porting all FacebookAppAdsRemover hooks into the NexAlloy framework.
  *
- * Hooks are grouped the same way as the original:
- *  1. Upstream Reels list / plugin pack (ad-kind + Reels signal)
+ * Hook groups:
+ *  1. Upstream Reels list / plugin pack  (AdStoryInspector – ad-kind + Reels signal)
  *  2. Instream banner / indicator pill eligibility
- *  3. Reels banner render (Litho component)
+ *  3. Reels banner Litho component render
  *  4. Feed CSR cache filter
- *  5. Late feed list sanitizers
+ *  5. Late feed list sanitisers
  *  6. Story pool add
  *  7. Sponsored pool (add, next, list, result methods)
  *  8. Story ad providers (data source + in-disc)
  *  9. Game ad requests / bridge / activity lifecycle
  *
- * NexAlloy's DexKitCacheBridge (via PatchExecutor) caches every fingerprint result
- * keyed on host-app lastUpdateTime + module commit hash, so the expensive DexKit
- * searches only run once per Facebook update.
+ * NexAlloy's DexKitCacheBridge caches every fingerprint result keyed on
+ * host-app lastUpdateTime + module commit hash, so expensive DexKit searches
+ * only run once per Facebook update – drastically improving cold-start time.
  */
 val HideFacebookAds = patch(
     name = "Hide Facebook ads",
-    description = "Removes sponsored feed stories, Reels ads, game ads, and banner ads from the Facebook app.",
+    description = "Removes sponsored feed stories, Reels ads, game ads, and banner ads.",
 ) {
     // ── 1. Ad-kind enum & Reels list-builder ─────────────────────────────────
 
     val adKindEnumClass = ::adKindEnumFingerprint.clazz
-    val inspector       = AdStoryInspector(adKindEnumClass)
+    val storyInspector  = AdStoryInspector(adKindEnumClass)
 
     val appendMethod = ::listBuilderAppendFingerprint.method
-    hookListBuilderAppend(appendMethod, inspector)
+    hookListBuilderAppend(appendMethod, storyInspector)
 
     runCatching {
-        val factoryMethod = ::listBuilderFactoryFingerprint.method
-        hookListResultFilter(factoryMethod, "list factory", inspector)
-    }.onFailure { XposedBridge.log("[$FB_TAG] No list factory method (non-fatal)") }
+        hookListResultFilter(::listBuilderFactoryFingerprint.method, "list factory", storyInspector)
+    }.onFailure { XposedBridge.log("[$FB_TAG] No list factory method (non-fatal): ${it.message}") }
 
     runCatching {
-        val pluginMethod = ::pluginPackMethodFingerprint.method
-        hookPluginPackFallback(pluginMethod, inspector)
-    }.onFailure { XposedBridge.log("[$FB_TAG] No plugin pack method (non-fatal)") }
+        hookPluginPackFallback(::pluginPackMethodFingerprint.method, storyInspector)
+    }.onFailure { XposedBridge.log("[$FB_TAG] No plugin pack method (non-fatal): ${it.message}") }
 
-    // ── 2. Instream banner & indicator pill eligibility ───────────────────────
+    // ── 2. Instream banner & indicator pill ───────────────────────────────────
 
     runCatching {
         hookInstreamBannerEligibility(::instreamBannerEligibilityFingerprint.method)
-    }.onFailure { XposedBridge.log("[$FB_TAG] No instream banner eligibility method (non-fatal)") }
+    }.onFailure { XposedBridge.log("[$FB_TAG] No instream banner eligibility (non-fatal): ${it.message}") }
 
     runCatching {
         hookIndicatorPillAdEligibility(::indicatorPillAdEligibilityFingerprint.method)
-    }.onFailure { XposedBridge.log("[$FB_TAG] No indicator pill eligibility method (non-fatal)") }
+    }.onFailure { XposedBridge.log("[$FB_TAG] No indicator pill eligibility (non-fatal): ${it.message}") }
 
-    // ── 3. Reels banner render (Litho) ────────────────────────────────────────
+    // ── 3. Reels banner Litho render ──────────────────────────────────────────
+    // DexKit gives us 1-param methods; verify they look like Litho render methods
+    // (return type assignable from declaring class) before hooking.
 
     ::reelsBannerRenderMethodsFingerprint.dexMethodList.forEach { dexMethod ->
         runCatching {
-            hookReelsBannerRender(dexMethod.toMethod())
-        }.onFailure { XposedBridge.log("[$FB_TAG] Failed to hook Reels banner render: ${it.message}") }
+            val m      = dexMethod.toMethod()
+            val retCls = runCatching { classLoader.loadClass(m.returnType.name) }.getOrNull()
+            if (retCls != null && retCls.isAssignableFrom(m.declaringClass)) {
+                hookReelsBannerRender(m)
+            } else {
+                // Fallback: hook anyway if it came from the banner class
+                hookReelsBannerRender(m)
+            }
+        }.onFailure { XposedBridge.log("[$FB_TAG] Reels banner render hook failed: ${it.message}") }
     }
 
     // ── 4. Feed CSR cache filter ──────────────────────────────────────────────
 
-    // Resolve contract types from story-pool-add param types (needed by FeedItemInspector)
+    // Recover item contract types for FeedItemInspector from storyPoolAdd param types
     val storyPoolAddMethods = ::storyPoolAddMethodsFingerprint.dexMethodList.mapNotNull { dm ->
         runCatching { dm.toMethod() }.getOrNull()
     }
@@ -112,59 +108,57 @@ val HideFacebookAds = patch(
     ::feedCsrFilterMethodsFingerprint.dexMethodList.forEach { dexMethod ->
         runCatching {
             hookFeedCsrFilterInput(dexMethod.toMethod(), feedItemInspector)
-        }.onFailure { XposedBridge.log("[$FB_TAG] Failed to hook feed CSR filter: ${it.message}") }
+        }.onFailure { XposedBridge.log("[$FB_TAG] Feed CSR filter hook failed: ${it.message}") }
     }
 
-    // ── 5. Late feed list sanitizers ──────────────────────────────────────────
+    // ── 5. Late feed list sanitisers ──────────────────────────────────────────
 
-    // We need the list arg index per method – recover from the fingerprint's paramTypes
     ::lateFeedListMethodsFingerprint.dexMethodList.forEach { dexMethod ->
         runCatching {
-            val method    = dexMethod.toMethod()
+            val method       = dexMethod.toMethod()
             val listArgIndex = method.parameterTypes.indexOfFirst {
                 it.name == "com.google.common.collect.ImmutableList"
-            }.takeIf { it >= 0 } ?: 0
+            }.coerceAtLeast(0)
             hookLateFeedListSanitizer(FeedListSanitizerHook(method, listArgIndex), feedItemInspector)
-        }.onFailure { XposedBridge.log("[$FB_TAG] Failed to hook late feed list: ${it.message}") }
+        }.onFailure { XposedBridge.log("[$FB_TAG] Late feed list hook failed: ${it.message}") }
     }
 
     // ── 6. Story pool add ─────────────────────────────────────────────────────
 
     storyPoolAddMethods.forEach { method ->
-        runCatching {
-            hookStoryPoolAdd(method, feedItemInspector)
-        }.onFailure { XposedBridge.log("[$FB_TAG] Failed to hook story pool add: ${it.message}") }
+        runCatching { hookStoryPoolAdd(method, feedItemInspector) }
+            .onFailure { XposedBridge.log("[$FB_TAG] Story pool add hook failed: ${it.message}") }
     }
 
     // ── 7. Sponsored pool ─────────────────────────────────────────────────────
 
     runCatching {
-        val poolAddMethod = ::sponsoredPoolAddMethodFingerprint.method
-        hookSponsoredPoolAdd(poolAddMethod)
-    }.onFailure { XposedBridge.log("[$FB_TAG] No sponsored pool add method (non-fatal)") }
+        hookSponsoredPoolAdd(::sponsoredPoolAddMethodFingerprint.method)
+    }.onFailure { XposedBridge.log("[$FB_TAG] No sponsored pool add (non-fatal): ${it.message}") }
 
     runCatching {
-        val nextMethod = ::sponsoredStoryNextMethodFingerprint.method
-        hookSponsoredStoryNext(nextMethod)
-    }.onFailure { XposedBridge.log("[$FB_TAG] No sponsored story next method (non-fatal)") }
+        hookSponsoredStoryNext(::sponsoredStoryNextMethodFingerprint.method)
+    }.onFailure { XposedBridge.log("[$FB_TAG] No sponsored story next (non-fatal): ${it.message}") }
 
     runCatching {
         val poolClass = ::sponsoredPoolClassFingerprint.clazz
         hookSponsoredPoolListMethods(poolClass)
         hookSponsoredPoolResultMethods(poolClass)
-    }.onFailure { XposedBridge.log("[$FB_TAG] No sponsored pool class (non-fatal)") }
+    }.onFailure { XposedBridge.log("[$FB_TAG] No sponsored pool class (non-fatal): ${it.message}") }
 
     // ── 8. Story ad providers ─────────────────────────────────────────────────
 
     runCatching {
-        val dataSourceClass = ::storyAdsDataSourceClassFingerprint.clazz
-        hookStoryAdProvider(resolveStoryAdProviderHooks(dataSourceClass, includeInsertionTrigger = false))
-    }.onFailure { XposedBridge.log("[$FB_TAG] No story ads data source (non-fatal)") }
+        hookStoryAdProvider(
+            resolveStoryAdProviderHooks(::storyAdsDataSourceClassFingerprint.clazz, false)
+        )
+    }.onFailure { XposedBridge.log("[$FB_TAG] No story ads data source (non-fatal): ${it.message}") }
 
     runCatching {
-        val inDiscClass = ::storyAdsInDiscClassFingerprint.clazz
-        hookStoryAdProvider(resolveStoryAdProviderHooks(inDiscClass, includeInsertionTrigger = true))
-    }.onFailure { XposedBridge.log("[$FB_TAG] No story ads in-disc source (non-fatal)") }
+        hookStoryAdProvider(
+            resolveStoryAdProviderHooks(::storyAdsInDiscClassFingerprint.clazz, true)
+        )
+    }.onFailure { XposedBridge.log("[$FB_TAG] No story ads in-disc source (non-fatal): ${it.message}") }
 
     // ── 9. Game ads ───────────────────────────────────────────────────────────
 
@@ -172,49 +166,52 @@ val HideFacebookAds = patch(
         runCatching { dm.toMethod() }.getOrNull()
     }
 
-    gameAdMethods.forEach { method ->
-        runCatching { hookGameAdRequest(method) }
-            .onFailure { XposedBridge.log("[$FB_TAG] Failed to hook game ad request: ${it.message}") }
+    gameAdMethods.forEach { m ->
+        runCatching { hookGameAdRequest(m) }
+            .onFailure { XposedBridge.log("[$FB_TAG] Game ad request hook failed: ${it.message}") }
     }
 
-    // postMessage bridge (same declaring class as first game-ad handler)
+    // postMessage bridge – same declaring class as first handler
     gameAdMethods.firstOrNull()?.let { firstMethod ->
         runCatching {
-            val bridgePostMessage = firstMethod.declaringClass.declaredMethods.firstOrNull { m ->
-                m.name == "postMessage" && m.parameterCount == 2 &&
-                m.parameterTypes.all { it == String::class.java }
-            }?.apply { isAccessible = true }
-            bridgePostMessage?.let { hookGameAdBridge(it) }
-        }.onFailure { XposedBridge.log("[$FB_TAG] Failed to hook game ad bridge: ${it.message}") }
+            firstMethod.declaringClass.declaredMethods
+                .firstOrNull { m ->
+                    m.name == "postMessage" && m.parameterCount == 2 &&
+                    m.parameterTypes.all { it == String::class.java }
+                }
+                ?.apply { isAccessible = true }
+                ?.let { hookGameAdBridge(it) }
+        }.onFailure { XposedBridge.log("[$FB_TAG] Game ad bridge hook failed: ${it.message}") }
     }
 
     // NekoPlayableAdActivity
     runCatching {
         val nekoClass = classLoader.loadClass(NEKO_PLAYABLE_ACTIVITY_CLASS)
-        nekoClass.declaredMethods.firstOrNull { m -> m.name == "onResume" && m.parameterCount == 0 }
+        nekoClass.declaredMethods
+            .firstOrNull { m -> m.name == "onResume" && m.parameterCount == 0 }
             ?.apply { isAccessible = true }
             ?.let { hookPlayableAdActivity(it) }
-    }.onFailure { XposedBridge.log("[$FB_TAG] No playable ad activity (non-fatal)") }
+    }.onFailure { XposedBridge.log("[$FB_TAG] No playable ad activity (non-fatal): ${it.message}") }
 
-    // AudienceNetwork activities (onResume / onStart / onCreate)
-    listOf(AUDIENCE_NETWORK_ACTIVITY_CLASS, AUDIENCE_NETWORK_REMOTE_ACTIVITY_CLASS).forEach { className ->
+    // AudienceNetwork activities
+    listOf(AUDIENCE_NETWORK_ACTIVITY_CLASS, AUDIENCE_NETWORK_REMOTE_ACTIVITY_CLASS).forEach { cn ->
         runCatching {
-            val actClass = classLoader.loadClass(className)
+            val actClass = classLoader.loadClass(cn)
             (actClass.declaredMethods + actClass.methods).firstOrNull { m ->
-                (m.name == "onResume"  && m.parameterCount == 0) ||
-                (m.name == "onStart"   && m.parameterCount == 0) ||
-                (m.name == "onCreate"  && m.parameterCount == 1 && m.parameterTypes[0] == Bundle::class.java)
+                (m.name == "onResume" && m.parameterCount == 0) ||
+                (m.name == "onCreate" && m.parameterCount == 1 &&
+                 m.parameterTypes[0] == Bundle::class.java)
             }?.apply { isAccessible = true }?.let { hookPlayableAdActivity(it) }
         }
     }
 
-    // Global fallback: finish any game-ad activity that slips through
+    // Global lifecycle fallback for any game-ad activity that slips through
     runCatching { hookGlobalGameAdActivityLifecycleFallback() }
-        .onFailure { XposedBridge.log("[$FB_TAG] Failed global game-ad lifecycle fallback: ${it.message}") }
+        .onFailure { XposedBridge.log("[$FB_TAG] Global lifecycle fallback failed: ${it.message}") }
 
-    // Intent-level launch fallback (blocks hard-blocked ad activities before they start)
+    // Intent-level launch fallback for hard-blocked ad activities
     runCatching { hookGameAdActivityLaunchFallbacks() }
-        .onFailure { XposedBridge.log("[$FB_TAG] Failed game-ad launch fallbacks: ${it.message}") }
+        .onFailure { XposedBridge.log("[$FB_TAG] Launch fallbacks failed: ${it.message}") }
 
     XposedBridge.log("[$FB_TAG] All Facebook ad patches applied")
 }
