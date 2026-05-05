@@ -4,16 +4,24 @@ import android.app.Activity
 import android.app.Instrumentation
 import android.content.ContextWrapper
 import android.content.Intent
+import android.os.Bundle
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.WebView
+import android.widget.TextView
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import org.json.JSONObject
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
+import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.LinkedHashMap
+import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -21,22 +29,32 @@ const val FB_TAG = "NexAlloy/Facebook"
 private const val BEFORE_SIZE_EXTRA = "nexalloy_fb_ads_before_size"
 private const val GAME_AD_SUCCESS_INSTANCE_PREFIX = "nexalloy_fb_noop_ad"
 private const val HOOK_HIT_LOG_EVERY = 25
+private const val GAME_AD_RECENT_WINDOW_MS    = 30_000L
+private const val GAME_AD_PROMISE_WINDOW_MS   = 10 * 60_000L
+private const val AUDIENCE_NETWORK_REWARD_CLOSE_RETRY_WINDOW_MS = 35_000L
 
-const val GRAPHQL_FEED_UNIT_EDGE_CLASS      = "com.facebook.graphql.model.GraphQLFeedUnitEdge"
-const val GRAPHQL_MULTI_ADS_FEED_UNIT_CLASS = "com.facebook.graphql.model.GraphQLFBMultiAdsFeedUnit"
+const val GRAPHQL_FEED_UNIT_EDGE_CLASS       = "com.facebook.graphql.model.GraphQLFeedUnitEdge"
+const val GRAPHQL_MULTI_ADS_FEED_UNIT_CLASS  = "com.facebook.graphql.model.GraphQLFBMultiAdsFeedUnit"
 const val GRAPHQL_QUICK_PROMO_FEED_UNIT_CLASS =
     "com.facebook.graphql.model.GraphQLQuickPromotionNativeTemplateFeedUnit"
 const val AUDIENCE_NETWORK_ACTIVITY_CLASS        = "com.facebook.ads.AudienceNetworkActivity"
 const val AUDIENCE_NETWORK_REMOTE_ACTIVITY_CLASS = "com.facebook.ads.internal.ipc.AudienceNetworkRemoteActivity"
 const val NEKO_PLAYABLE_ACTIVITY_CLASS           = "com.facebook.neko.playables.activity.NekoPlayableAdActivity"
 
-const val GAME_AD_REJECTION_MESSAGE = "Game ad request blocked"
-const val GAME_AD_REJECTION_CODE    = "CLIENT_UNSUPPORTED_OPERATION"
+const val GAME_AD_REJECTION_MESSAGE   = "Game ad request blocked"
+const val GAME_AD_REJECTION_CODE      = "CLIENT_UNSUPPORTED_OPERATION"
+const val GAME_AD_UNAVAILABLE_MESSAGE = "Rewarded ad unavailable"
+const val GAME_AD_UNAVAILABLE_CODE    = "ADS_UNAVAILABLE"
 
 val GAME_AD_MESSAGE_TYPES = setOf(
     "getinterstitialadasync", "getrewardedvideoasync", "getrewardedinterstitialasync",
-    "loadadasync", "showadasync", "loadbanneradasync"
+    "loadadasync", "showadasync", "loadbanneradasync", "hidebanneradasync"
 )
+
+/** Only these types are auto-fixed (banner/hide); rewarded/interstitial get ADS_UNAVAILABLE. */
+val GAME_AD_AUTOFIX_MESSAGE_TYPES = setOf("loadbanneradasync", "hidebanneradasync")
+
+val GAME_AD_UNAVAILABLE_MESSAGE_TYPES = setOf("getrewardedvideoasync", "getrewardedinterstitialasync")
 
 val GAME_AD_ACTIVITY_CLASS_NAMES = setOf(
     AUDIENCE_NETWORK_ACTIVITY_CLASS,
@@ -45,6 +63,13 @@ val GAME_AD_ACTIVITY_CLASS_NAMES = setOf(
 )
 
 val HARD_BLOCKED_GAME_AD_ACTIVITY_CLASS_NAMES = setOf(NEKO_PLAYABLE_ACTIVITY_CLASS)
+
+val AUDIENCE_NETWORK_REWARD_COMPLETION_METHOD_NAMES = setOf(
+    "onRewardedVideoCompleted", "onRewardedAdCompleted", "onRewardedInterstitialCompleted",
+    "onAdComplete", "onAdCompleted"
+)
+
+val AUDIENCE_NETWORK_CLOSE_LISTENER_CLASS_NAMES = setOf("X.mGv", "X.mGo", "p000X.mGv", "p000X.mGo")
 
 val FEED_AD_CATEGORY_VALUES          = setOf("SPONSORED", "PROMOTION", "AD", "ADVERTISEMENT", "BANNER")
 val FEED_SAFE_CONTAINER_CATEGORY_VALUES = setOf("FB_SHORTS", "MULTI_FB_STORIES_TRAY")
@@ -71,10 +96,25 @@ val GAME_AD_METHOD_TAGS = listOf(
     "Invalid JSON content received by onShowAdAsync: "
 )
 
-// ─── Shared mutable state ─────────────────────────────────────────────────────
+// ─── Shared state ─────────────────────────────────────────────────────────────
 
-val gameAdInstanceIds = ConcurrentHashMap<String, String>()
-val hookHitCounters   = ConcurrentHashMap<String, AtomicInteger>()
+val gameAdInstanceIds    = ConcurrentHashMap<String, String>()
+val gameAdInstanceTypes  = ConcurrentHashMap<String, String>()
+val gameAdPromiseSnapshots = ConcurrentHashMap<String, GameAdPromiseSnapshot>()
+val recentGameAdTargets  = Collections.synchronizedMap(WeakHashMap<Any, Long>())
+val recentGameAdPayloads = Collections.synchronizedList(ArrayList<GameAdPayloadSnapshot>())
+val hookHitCounters      = ConcurrentHashMap<String, AtomicInteger>()
+private val gameAdResultHooksInstalled         = AtomicInteger(0)
+private val gameAdServiceDispatchHooksInstalled = AtomicInteger(0)
+private val gameAdSurfaceHooksInstalled        = AtomicInteger(0)
+private val audienceNetworkRewardHooksInstalled = AtomicInteger(0)
+private val audienceNetworkRewardClassesHooked  = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+private val audienceNetworkRewardAdListeners    = Collections.synchronizedMap(WeakHashMap<Any, Any>())
+private val scheduledGameAdActivityCloses       = Collections.synchronizedMap(WeakHashMap<Activity, Long>())
+private val scheduledAudienceNetworkExitViews   = Collections.synchronizedMap(WeakHashMap<View, Long>())
+private val lastGameAdActivityCloseMs    = AtomicLong(0L)
+private val lastUnavailableGameAdMs      = AtomicLong(0L)
+private val marketplaceAdsPackCache      = ConcurrentHashMap<String, Boolean>()
 
 // ─── Data classes ─────────────────────────────────────────────────────────────
 
@@ -88,6 +128,19 @@ data class StoryAdProviderHooks(
     val insertionTriggerMethod: Method?
 )
 
+data class GameAdPayloadSnapshot(
+    val target: Any,
+    val payload: JSONObject,
+    val messageType: String?,
+    val timestampMs: Long
+)
+
+data class GameAdPromiseSnapshot(
+    val payload: JSONObject,
+    val messageType: String?,
+    val timestampMs: Long
+)
+
 // ─── AdStoryInspector ─────────────────────────────────────────────────────────
 
 class AdStoryInspector(private val adKindEnumClass: Class<*>) {
@@ -95,14 +148,10 @@ class AdStoryInspector(private val adKindEnumClass: Class<*>) {
     private val fieldCache      = ConcurrentHashMap<Class<*>, List<Field>>()
 
     fun containsAdStory(
-        value: Any?,
-        depth: Int = 0,
-        seen: IdentityHashMap<Any, Boolean> = IdentityHashMap()
+        value: Any?, depth: Int = 0, seen: IdentityHashMap<Any, Boolean> = IdentityHashMap()
     ): Boolean = containsAdKind(value, depth, seen) && containsReelsAdSignal(value, 0, IdentityHashMap())
 
-    private fun containsAdKind(
-        value: Any?, depth: Int, seen: IdentityHashMap<Any, Boolean>
-    ): Boolean {
+    private fun containsAdKind(value: Any?, depth: Int, seen: IdentityHashMap<Any, Boolean>): Boolean {
         if (value == null || depth > 4) return false
         if (isAdKind(value)) return true
         val type = value.javaClass
@@ -115,9 +164,7 @@ class AdStoryInspector(private val adKindEnumClass: Class<*>) {
         return false
     }
 
-    private fun containsReelsAdSignal(
-        value: Any?, depth: Int, seen: IdentityHashMap<Any, Boolean>
-    ): Boolean {
+    private fun containsReelsAdSignal(value: Any?, depth: Int, seen: IdentityHashMap<Any, Boolean>): Boolean {
         if (value == null || depth > 4) return false
         if (value is CharSequence) return isReelsAdSignalText(value.toString())
         val type = value.javaClass
@@ -143,20 +190,15 @@ class AdStoryInspector(private val adKindEnumClass: Class<*>) {
                 if (!Modifier.isStatic(m.modifiers) && m.parameterCount == 0 && m.returnType == adKindEnumClass) {
                     m.isAccessible = true; map.putIfAbsent("${cur.name}#${m.name}", m)
                 }
-            }
-            cur = cur.superclass
-        }
-        map.values.toList()
+            }; cur = cur.superclass
+        }; map.values.toList()
     }
 
     private fun fieldsFor(type: Class<*>) = fieldCache.getOrPut(type) {
-        val list = ArrayList<Field>()
-        var cur: Class<*>? = type
+        val list = ArrayList<Field>(); var cur: Class<*>? = type
         while (cur != null && cur != Any::class.java && list.size < 24) {
-            cur.declaredFields.forEach { f -> if (!Modifier.isStatic(f.modifiers) && list.size < 24) { f.isAccessible = true; list.add(f) } }
-            cur = cur.superclass
-        }
-        list
+            cur.declaredFields.forEach { f -> if (!Modifier.isStatic(f.modifiers) && list.size < 24) { f.isAccessible = true; list.add(f) } }; cur = cur.superclass
+        }; list
     }
 
     private fun stringMethodsFor(type: Class<*>) = allMethodsFor(type).asSequence()
@@ -164,28 +206,24 @@ class AdStoryInspector(private val adKindEnumClass: Class<*>) {
         .take(12).onEach { it.isAccessible = true }.toList()
 
     private fun allMethodsFor(type: Class<*>): List<Method> {
-        val map = LinkedHashMap<String, Method>()
-        var cur: Class<*>? = type
+        val map = LinkedHashMap<String, Method>(); var cur: Class<*>? = type
         while (cur != null && cur != Any::class.java) {
-            cur.declaredMethods.forEach { m -> if (!Modifier.isStatic(m.modifiers)) { m.isAccessible = true; map.putIfAbsent("${cur.name}#${m.name}/${m.parameterCount}", m) } }
-            cur = cur.superclass
-        }
-        return map.values.toList()
+            cur.declaredMethods.forEach { m -> if (!Modifier.isStatic(m.modifiers)) { m.isAccessible = true; map.putIfAbsent("${cur.name}#${m.name}/${m.parameterCount}", m) } }; cur = cur.superclass
+        }; return map.values.toList()
     }
 
     private fun isReelsAdSignalText(v: String?): Boolean {
         if (v.isNullOrBlank()) return false
-        val n = v.lowercase()
-        return REELS_AD_SIGNAL_TOKENS.any { n.contains(it) }
+        val n = v.lowercase(); return REELS_AD_SIGNAL_TOKENS.any { n.contains(it) }
     }
 }
 
 // ─── FeedItemInspector ────────────────────────────────────────────────────────
 
 class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
-    private val itemModelAccessor   = resolveItemModelAccessor(itemContractTypes)
-    private val itemEdgeAccessor    = resolveItemEdgeAccessor(itemContractTypes)
-    private val itemNetworkAccessor = resolveItemNetworkAccessor(itemContractTypes)
+    private val itemModelAccessor    = resolveItemModelAccessor(itemContractTypes)
+    private val itemEdgeAccessor     = resolveItemEdgeAccessor(itemContractTypes)
+    private val itemNetworkAccessor  = resolveItemNetworkAccessor(itemContractTypes)
     private val categoryMethodCache  = ConcurrentHashMap<Class<*>, Method>()
     private val edgeAccessorCache    = ConcurrentHashMap<Class<*>, Method>()
     private val feedUnitAccessorCache = ConcurrentHashMap<Class<*>, Method>()
@@ -195,25 +233,19 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
 
     fun isSponsoredFeedItem(value: Any?): Boolean {
         if (isDefinitelySponsoredFeedItem(value)) return true
-        val model    = invokeNoThrow(itemModelAccessor, value)
-        val edge     = edgeFrom(value)
-        val feedUnit = feedUnitFrom(edge)
-        return containsKnownAdSignals(value) || containsKnownAdSignals(model) ||
-               containsKnownAdSignals(edge)  || containsKnownAdSignals(feedUnit)
+        val model = invokeNoThrow(itemModelAccessor, value); val edge = edgeFrom(value); val feedUnit = feedUnitFrom(edge)
+        return containsKnownAdSignals(value) || containsKnownAdSignals(model) || containsKnownAdSignals(edge) || containsKnownAdSignals(feedUnit)
     }
 
     fun isDefinitelySponsoredFeedItem(value: Any?): Boolean {
         if (value == null) return false
-        val model         = invokeNoThrow(itemModelAccessor, value)
-        val modelCategory = readCategory(model)
+        val model = invokeNoThrow(itemModelAccessor, value); val modelCategory = readCategory(model)
         if (isSafeFeedContainerCategory(modelCategory)) return false
-        if (isSponsoredFeedCategory(modelCategory))     return true
-        val edge         = edgeFrom(value)
-        val edgeCategory = readCategory(edge)
+        if (isSponsoredFeedCategory(modelCategory)) return true
+        val edge = edgeFrom(value); val edgeCategory = readCategory(edge)
         if (isSafeFeedContainerCategory(edgeCategory)) return false
-        if (isSponsoredFeedCategory(edgeCategory))     return true
-        val feedUnit      = feedUnitFrom(edge)
-        val unitClassName = feedUnit?.javaClass?.name
+        if (isSponsoredFeedCategory(edgeCategory)) return true
+        val feedUnit = feedUnitFrom(edge); val unitClassName = feedUnit?.javaClass?.name
         if (unitClassName == GRAPHQL_MULTI_ADS_FEED_UNIT_CLASS || unitClassName == GRAPHQL_QUICK_PROMO_FEED_UNIT_CLASS) return true
         val typeName = readTypeName(feedUnit)
         return isLikelyAdTypeName(typeName) || isAdSignalText(unitClassName)
@@ -221,13 +253,10 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
 
     fun describe(item: Any?): String {
         if (item == null) return "null"
-        val edge      = edgeFrom(item)
-        val feedUnit  = feedUnitFrom(edge)
-        val category  = readCategory(invokeNoThrow(itemModelAccessor, item)) ?: readCategory(edge) ?: "unknown"
-        val network   = invokeNoThrow(itemNetworkAccessor, item)?.toString() ?: "unknown"
-        val unitClass = feedUnit?.javaClass?.name ?: "null"
-        val typeName  = readTypeName(feedUnit) ?: "unknown"
-        return "cat=$category isAd=${isSponsoredFeedItem(item)} network=$network wrapper=${item.javaClass.name} unit=$unitClass type=$typeName"
+        val edge = edgeFrom(item); val feedUnit = feedUnitFrom(edge)
+        val category = readCategory(invokeNoThrow(itemModelAccessor, item)) ?: readCategory(edge) ?: "unknown"
+        val network = invokeNoThrow(itemNetworkAccessor, item)?.toString() ?: "unknown"
+        return "cat=$category isAd=${isSponsoredFeedItem(item)} network=$network wrapper=${item.javaClass.name} unit=${feedUnit?.javaClass?.name ?: "null"} type=${readTypeName(feedUnit) ?: "unknown"}"
     }
 
     private fun edgeFrom(value: Any?): Any? {
@@ -246,7 +275,7 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
             resolveChildAccessor(edge) { v ->
                 val cn = v?.javaClass?.name
                 cn == GRAPHQL_MULTI_ADS_FEED_UNIT_CLASS || cn == GRAPHQL_QUICK_PROMO_FEED_UNIT_CLASS ||
-                        readTypeName(v)?.let { it != "FeedUnitEdge" } == true
+                readTypeName(v)?.let { it != "FeedUnitEdge" } == true
             }
         }
         return invokeNoThrow(accessor, edge)
@@ -275,8 +304,7 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
     }
 
     private fun cachedMethod(cache: ConcurrentHashMap<Class<*>, Method>, type: Class<*>, resolver: () -> Method?): Method? {
-        cache[type]?.let { return it }
-        val resolved = resolver() ?: return null
+        cache[type]?.let { return it }; val resolved = resolver() ?: return null
         return cache.putIfAbsent(type, resolved) ?: resolved
     }
 
@@ -298,17 +326,8 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
     private fun resolveChildAccessor(target: Any, acceptsValue: (Any?) -> Boolean): Method? =
         allInstanceMethods(target.javaClass).asSequence()
             .filter { m -> m.parameterCount == 0 && !m.returnType.isPrimitive && m.returnType != Void.TYPE && m.returnType != String::class.java && !m.returnType.isEnum && m.declaringClass != Any::class.java }
-            .sortedByDescending { m -> scoreChildAccessor(m.returnType) }
+            .sortedByDescending { m -> when { m.returnType.name == GRAPHQL_FEED_UNIT_EDGE_CLASS -> 4; m.returnType.name.startsWith("com.facebook.graphql.model.") -> 3; m.returnType.name.startsWith("com.facebook.") -> 2; !m.returnType.name.startsWith("java.") && !m.returnType.name.startsWith("android.") && !m.returnType.name.startsWith("kotlin.") -> 1; else -> 0 } }
             .firstOrNull { m -> acceptsValue(invokeNoThrow(m.apply { isAccessible = true }, target)) }
-
-    private fun scoreChildAccessor(type: Class<*>) = when {
-        type.name == GRAPHQL_FEED_UNIT_EDGE_CLASS                         -> 4
-        type.name.startsWith("com.facebook.graphql.model.")               -> 3
-        type.name.startsWith("com.facebook.")                             -> 2
-        !type.name.startsWith("java.") && !type.name.startsWith("javax.") &&
-        !type.name.startsWith("android.") && !type.name.startsWith("kotlin.") -> 1
-        else                                                               -> 0
-    }
 
     private fun containsKnownAdSignals(value: Any?): Boolean {
         if (value == null) return false
@@ -330,18 +349,14 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
     }
 
     private fun stringFieldsFor(type: Class<*>) = stringFieldCache.getOrPut(type) {
-        val list = ArrayList<Field>()
-        var cur: Class<*>? = type
+        val list = ArrayList<Field>(); var cur: Class<*>? = type
         while (cur != null && cur != Any::class.java && list.size < 12) {
-            cur.declaredFields.forEach { f -> if (!Modifier.isStatic(f.modifiers) && f.type == String::class.java && list.size < 12) { f.isAccessible = true; list.add(f) } }
-            cur = cur.superclass
-        }
-        list
+            cur.declaredFields.forEach { f -> if (!Modifier.isStatic(f.modifiers) && f.type == String::class.java && list.size < 12) { f.isAccessible = true; list.add(f) } }; cur = cur.superclass
+        }; list
     }
 
     fun isAdSignalText(value: String?): Boolean {
-        if (value.isNullOrBlank()) return false
-        val n = value.lowercase()
+        if (value.isNullOrBlank()) return false; val n = value.lowercase()
         return FEED_AD_SIGNAL_TOKENS.any { n.contains(it) }
     }
 
@@ -350,14 +365,12 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
     private fun isLikelyAdTypeName(v: String?)          = v != null && (v.contains("QuickPromotion", ignoreCase = true) || isAdSignalText(v))
 
     private fun allInstanceMethods(type: Class<*>): List<Method> {
-        val map = LinkedHashMap<String, Method>()
-        var cur: Class<*>? = type
+        val map = LinkedHashMap<String, Method>(); var cur: Class<*>? = type
         while (cur != null && cur != Any::class.java) {
             cur.declaredMethods.forEach { m -> if (!Modifier.isStatic(m.modifiers)) { m.isAccessible = true; map.putIfAbsent("${cur.name}#${m.name}/${m.parameterCount}", m) } }
             cur.interfaces.forEach { iface -> iface.declaredMethods.forEach { m -> if (!Modifier.isStatic(m.modifiers)) { m.isAccessible = true; map.putIfAbsent("${iface.name}#${m.name}/${m.parameterCount}", m) } } }
             cur = cur.superclass
-        }
-        return map.values.toList()
+        }; return map.values.toList()
     }
 
     private fun invokeNoThrow(method: Method?, target: Any?) =
@@ -368,10 +381,8 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
 
 fun logHookHitThrottled(hookName: String, method: Method, detail: String? = null) {
     val hits = hookHitCounters.computeIfAbsent(hookName) { AtomicInteger(0) }.incrementAndGet()
-    if (hits <= 3 || hits % HOOK_HIT_LOG_EVERY == 0) {
-        val extra = detail?.let { " $it" } ?: ""
-        XposedBridge.log("[$FB_TAG] Hit $hookName #$hits at ${method.declaringClass.name}.${method.name}$extra")
-    }
+    if (hits <= 3 || hits % HOOK_HIT_LOG_EVERY == 0)
+        XposedBridge.log("[$FB_TAG] Hit $hookName #$hits at ${method.declaringClass.name}.${method.name}${detail?.let { " $it" } ?: ""}")
 }
 
 // ─── Hook installers – Reels / list-builder ───────────────────────────────────
@@ -405,14 +416,33 @@ fun hookListResultFilter(method: Method, source: String, inspector: AdStoryInspe
 fun hookPluginPackFallback(method: Method, inspector: AdStoryInspector) {
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
-            if (inspector.containsAdStory(param.thisObject)) param.result = arrayListOf<Any?>()
+            if (isMarketplaceAdsPluginPack(param.thisObject)) {
+                XposedBridge.log("[$FB_TAG] Returning empty plugin pack for marketplace ads")
+                param.result = arrayListOf<Any?>(); return
+            }
+            if (inspector.containsAdStory(param.thisObject)) {
+                XposedBridge.log("[$FB_TAG] Returning empty plugin pack for ad-backed story")
+                param.result = arrayListOf<Any?>()
+            }
         }
         override fun afterHookedMethod(param: MethodHookParam) {
+            if (isMarketplaceAdsPluginPack(param.thisObject)) return
             val result = param.result as? MutableList<Any?> ?: return
             val removed = filterAdItems(result, inspector)
             if (removed > 0) XposedBridge.log("[$FB_TAG] Removed $removed ad plugin item(s)")
         }
     })
+}
+
+private fun isMarketplaceAdsPluginPack(instance: Any): Boolean {
+    val className = instance.javaClass.name
+    return marketplaceAdsPackCache.getOrPut(className) {
+        runCatching {
+            instance.javaClass.declaredMethods
+                .filter { m -> m.parameterCount == 0 && m.returnType == String::class.java && !Modifier.isStatic(m.modifiers) }
+                .any { m -> m.isAccessible = true; (m.invoke(instance) as? String)?.contains("Ads", ignoreCase = true) == true }
+        }.getOrDefault(false)
+    }
 }
 
 // ─── Hook installers – Feed CSR / late-list ───────────────────────────────────
@@ -497,13 +527,9 @@ fun hookSponsoredStoryNext(method: Method) {
 
 fun hookSponsoredPoolListMethods(poolClass: Class<*>) {
     var hooked = 0
-    poolClass.declaredMethods.filter { m ->
-        !Modifier.isStatic(m.modifiers) && m.parameterCount == 0 && List::class.java.isAssignableFrom(m.returnType)
-    }.forEach { m ->
+    poolClass.declaredMethods.filter { m -> !Modifier.isStatic(m.modifiers) && m.parameterCount == 0 && List::class.java.isAssignableFrom(m.returnType) }.forEach { m ->
         m.isAccessible = true
-        XposedBridge.hookMethod(m, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) { param.result = arrayListOf<Any?>() }
-        })
+        XposedBridge.hookMethod(m, object : XC_MethodHook() { override fun beforeHookedMethod(param: MethodHookParam) { param.result = arrayListOf<Any?>() } })
         hooked++
     }
     XposedBridge.log("[$FB_TAG] Hooked $hooked pool list method(s) on ${poolClass.name}")
@@ -516,9 +542,7 @@ fun hookSponsoredPoolResultMethods(poolClass: Class<*>) {
         (m.parameterCount == 0 || (m.parameterCount == 1 && m.parameterTypes[0] == Boolean::class.javaPrimitiveType))
     }.forEach { m ->
         m.isAccessible = true
-        XposedBridge.hookMethod(m, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) { buildSponsoredEmptyResult(m.returnType)?.let { param.result = it } }
-        })
+        XposedBridge.hookMethod(m, object : XC_MethodHook() { override fun beforeHookedMethod(param: MethodHookParam) { buildSponsoredEmptyResult(m.returnType)?.let { param.result = it } } })
         hooked++
     }
     XposedBridge.log("[$FB_TAG] Hooked $hooked pool result method(s) on ${poolClass.name}")
@@ -527,16 +551,12 @@ fun hookSponsoredPoolResultMethods(poolClass: Class<*>) {
 // ─── Hook installers – Story ad providers ────────────────────────────────────
 
 fun hookStoryAdsNoOp(method: Method) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) { param.result = null }
-    })
+    XposedBridge.hookMethod(method, object : XC_MethodHook() { override fun beforeHookedMethod(param: MethodHookParam) { param.result = null } })
 }
 
 fun hookStoryAdsMerge(method: Method) {
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            param.args.getOrNull(2)?.let { param.result = it }
-        }
+        override fun beforeHookedMethod(param: MethodHookParam) { param.args.getOrNull(2)?.let { param.result = it } }
     })
 }
 
@@ -553,9 +573,16 @@ fun hookGameAdRequest(method: Method) {
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             val payload = param.args.getOrNull(0) ?: return
-            if (!resolveGameAdPayload(param.thisObject, payload))
-                rejectGameAdPayload(param.thisObject, payload)
-            param.result = null
+            val messageType = inferGameAdMessageType(method, payload)
+            rememberGameAdPayload(param.thisObject, payload, messageType)
+            if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, messageType)) { param.result = null; return }
+            if (!shouldAutofixGameAdMessage(messageType)) return
+            if (resolveGameAdPayload(param.thisObject, payload, messageType)) {
+                dispatchPostResolveGameAdSignals(param.thisObject, payload, messageType)
+                param.result = null
+            } else if (rejectGameAdPayload(param.thisObject, payload)) {
+                param.result = null
+            }
         }
     })
 }
@@ -563,15 +590,96 @@ fun hookGameAdRequest(method: Method) {
 fun hookGameAdBridge(method: Method) {
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
-            val raw     = param.args.getOrNull(0) as? String ?: return
+            val raw = param.args.getOrNull(0) as? String ?: return
             val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
-            val type    = payload.optString("type")
-            if (type !in GAME_AD_MESSAGE_TYPES) return
-            if (!resolveGameAdPayload(param.thisObject, payload, type))
-                rejectGameAdPayload(param.thisObject, payload)
-            param.result = null
+            val type = payload.optString("type"); if (type !in GAME_AD_MESSAGE_TYPES) return
+            rememberGameAdPayload(param.thisObject, payload, type)
+            if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, type)) { param.result = null; return }
+            if (!shouldAutofixGameAdMessage(type)) return
+            if (resolveGameAdPayload(param.thisObject, payload, type)) {
+                dispatchPostResolveGameAdSignals(param.thisObject, payload, type)
+                param.result = null
+            } else if (rejectGameAdPayload(param.thisObject, payload)) {
+                param.result = null
+            }
         }
     })
+}
+
+/** Hook resolve/reject methods on the bridge class for deeper interception. */
+fun hookGameAdResultMethods(bridgeClass: Class<*>) {
+    if (!gameAdResultHooksInstalled.compareAndSet(0, 1)) return
+    val resolveMethod = resolveGameAdResolveMethod(bridgeClass)
+    val rejectMethod  = resolveGameAdRejectMethod(bridgeClass)
+    val bridgeRejectMethod = resolveGameAdBridgeRejectMethod(bridgeClass)
+    var hooked = 0
+
+    resolveMethod?.let { m ->
+        XposedBridge.hookMethod(m, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                val promiseId = param.args.getOrNull(0) as? String ?: return
+                val snapshot = gameAdPromiseSnapshots[promiseId] ?: return
+                if (snapshot.messageType !in GAME_AD_MESSAGE_TYPES) return
+                if (!shouldAutofixGameAdMessage(snapshot.messageType)) return
+                val original = param.args.getOrNull(1)
+                param.args[1] = forceGameAdSuccessResult(promiseId, original, snapshot.payload, snapshot.messageType)
+            }
+        }); hooked++
+    }
+
+    if (rejectMethod != null && resolveMethod != null) {
+        XposedBridge.hookMethod(rejectMethod, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                val promiseId = param.args.getOrNull(0) as? String ?: return
+                val reason = param.args.drop(1).joinToString(" ") { it?.toString().orEmpty() }
+                if (!shouldConvertGameAdRejectToSuccess(promiseId, reason)) return
+                val snapshot = gameAdPromiseSnapshots[promiseId]
+                val success = forceGameAdSuccessResult(promiseId, null, snapshot?.payload, snapshot?.messageType ?: gameAdPromiseTypeFromReason(reason))
+                runCatching { XposedBridge.invokeOriginalMethod(resolveMethod, param.thisObject, arrayOf(promiseId, success)); param.result = null }
+            }
+        }); hooked++
+    }
+
+    if (bridgeRejectMethod != null && resolveMethod != null && bridgeRejectMethod != rejectMethod) {
+        XposedBridge.hookMethod(bridgeRejectMethod, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                val payload = param.args.getOrNull(2) as? JSONObject ?: return
+                val promiseId = extractPromiseId(payload) ?: return
+                val reason = param.args.take(2).joinToString(" ") { it?.toString().orEmpty() }
+                if (!shouldConvertGameAdRejectToSuccess(promiseId, reason)) return
+                val snapshot = gameAdPromiseSnapshots[promiseId]
+                val success = forceGameAdSuccessResult(promiseId, null, snapshot?.payload ?: payload, snapshot?.messageType ?: gameAdPromiseTypeFromReason(reason))
+                runCatching { XposedBridge.invokeOriginalMethod(resolveMethod, param.thisObject, arrayOf(promiseId, success)); param.result = null }
+            }
+        }); hooked++
+    }
+    XposedBridge.log("[$FB_TAG] Hooked $hooked game ad result helper(s) on ${bridgeClass.name}")
+}
+
+/** Hook Bundle-based service dispatch methods on the bridge class. */
+fun hookGameAdServiceDispatchMethods(bridgeClass: Class<*>) {
+    if (!gameAdServiceDispatchHooksInstalled.compareAndSet(0, 1)) return
+    val methods = (bridgeClass.declaredMethods + bridgeClass.methods).filter { m ->
+        !Modifier.isStatic(m.modifiers) && m.returnType == Void.TYPE && m.parameterCount == 2 && m.parameterTypes[0] == Bundle::class.java
+    }.distinctBy { m -> m.name + m.parameterTypes.joinToString { it.name } }
+    var hooked = 0
+    methods.forEach { m ->
+        m.isAccessible = true
+        XposedBridge.hookMethod(m, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                val bundle = param.args.getOrNull(0) as? Bundle ?: return
+                val messageType = param.args.getOrNull(1)?.toString()?.lowercase()?.takeIf { it in GAME_AD_MESSAGE_TYPES } ?: return
+                val payload = buildGameAdPayloadFromServiceBundle(bundle, messageType)
+                rememberGameAdPayload(param.thisObject, payload, messageType)
+                if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, messageType)) { param.result = null; return }
+                if (!shouldAutofixGameAdMessage(messageType)) return
+                if (resolveGameAdPayload(param.thisObject, payload, messageType)) {
+                    dispatchPostResolveGameAdSignals(param.thisObject, payload, messageType); param.result = null
+                }
+            }
+        }); hooked++
+    }
+    XposedBridge.log("[$FB_TAG] Hooked $hooked game ad service dispatch method(s) on ${bridgeClass.name}")
 }
 
 fun hookPlayableAdActivity(method: Method) {
@@ -579,20 +687,19 @@ fun hookPlayableAdActivity(method: Method) {
         override fun afterHookedMethod(param: MethodHookParam) {
             val activity = param.thisObject as? Activity ?: return
             if (activity.javaClass.name != method.declaringClass.name) return
-            finishGameAdActivity(activity)
+            handleGameAdActivity(activity, "direct hook ${method.declaringClass.name}.${method.name}")
         }
     })
 }
 
 fun hookGlobalGameAdActivityLifecycleFallback() {
     val onResume = (Activity::class.java.declaredMethods + Activity::class.java.methods)
-        .firstOrNull { m -> m.name == "onResume" && m.parameterCount == 0 }
-        ?.apply { isAccessible = true } ?: return
+        .firstOrNull { m -> m.name == "onResume" && m.parameterCount == 0 }?.apply { isAccessible = true } ?: return
     XposedBridge.hookMethod(onResume, object : XC_MethodHook() {
         override fun afterHookedMethod(param: MethodHookParam) {
             val activity = param.thisObject as? Activity ?: return
             if (activity.javaClass.name !in GAME_AD_ACTIVITY_CLASS_NAMES) return
-            finishGameAdActivity(activity)
+            handleGameAdActivity(activity, "global lifecycle fallback")
         }
     })
     XposedBridge.log("[$FB_TAG] Hooked global game ad activity lifecycle fallback")
@@ -604,11 +711,7 @@ fun hookGameAdActivityLaunchFallbacks() {
         (type.declaredMethods + type.methods).filter { m ->
             m.name in setOf("execStartActivity","startActivity","startActivityForResult","startActivityIfNeeded") &&
             m.parameterTypes.any { it == Intent::class.java }
-        }.forEach { m ->
-            m.isAccessible = true
-            val sig = "${m.declaringClass.name}.${m.name}(${m.parameterTypes.joinToString(",") { it.name }})"
-            methods.putIfAbsent(sig, m)
-        }
+        }.forEach { m -> m.isAccessible = true; methods.putIfAbsent("${m.declaringClass.name}.${m.name}(${m.parameterTypes.joinToString(",") { it.name }})", m) }
     }
     var hooked = 0
     methods.values.forEach { m ->
@@ -617,35 +720,476 @@ fun hookGameAdActivityLaunchFallbacks() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val intent = param.args.firstOrNull { it is Intent } as? Intent ?: return
                     val target = intent.component?.className ?: return
-                    if (target !in HARD_BLOCKED_GAME_AD_ACTIVITY_CLASS_NAMES) return
+                    if (target !in GAME_AD_ACTIVITY_CLASS_NAMES) return
+                    if (!shouldBlockGameAdActivityLaunch(target)) return
+                    completeRecentGameAdRequests("launch fallback $target")
                     param.result = if (m.returnType == Boolean::class.javaPrimitiveType) false else null
                 }
-            })
-            hooked++
+            }); hooked++
         }
     }
     XposedBridge.log("[$FB_TAG] Hooked $hooked game ad activity launch fallback(s)")
+}
+
+/** Hook ViewGroup.addView, TextView.setText, WebView methods to catch native ad views. */
+fun hookGlobalGameAdSurfaceFallbacks() {
+    if (!gameAdSurfaceHooksInstalled.compareAndSet(0, 1)) return
+    var hooked = 0
+
+    (ViewGroup::class.java.declaredMethods + ViewGroup::class.java.methods)
+        .filter { m -> m.name == "addView" && m.parameterTypes.any { it == View::class.java } }
+        .distinctBy { m -> m.name + m.parameterTypes.joinToString { it.name } }
+        .forEach { m ->
+            m.isAccessible = true
+            XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val child = param.args.firstOrNull { it is View } as? View ?: return
+                    if (isPotentialNativeGameAdView(child)) { hideLikelyGameAdContainer(child) }
+                    else if (child is WebView) { injectGameAdHidingScript(child) }
+                }
+            }); hooked++
+        }
+
+    (TextView::class.java.declaredMethods + TextView::class.java.methods)
+        .filter { m -> m.name == "setText" && m.parameterTypes.isNotEmpty() && CharSequence::class.java.isAssignableFrom(m.parameterTypes[0]) }
+        .distinctBy { m -> m.name + m.parameterTypes.joinToString { it.name } }
+        .forEach { m ->
+            m.isAccessible = true
+            XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val tv = param.thisObject as? TextView ?: return
+                    if (isGameAdMarkerText(tv.text)) hideLikelyGameAdContainer(tv)
+                }
+            }); hooked++
+        }
+
+    (WebView::class.java.declaredMethods + WebView::class.java.methods)
+        .filter { m -> m.name in setOf("loadUrl","loadData","loadDataWithBaseURL","onAttachedToWindow") }
+        .distinctBy { m -> m.name + m.parameterTypes.joinToString { it.name } }
+        .forEach { m ->
+            m.isAccessible = true
+            XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val wv = param.thisObject as? WebView ?: return; injectGameAdHidingScript(wv)
+                }
+            }); hooked++
+        }
+
+    XposedBridge.log("[$FB_TAG] Hooked $hooked global game ad surface fallback method(s)")
+}
+
+/** Hook Audience Network reward classes to fire completion callbacks. */
+fun hookAudienceNetworkRewardFallbacks(classLoader: ClassLoader) {
+    if (!audienceNetworkRewardHooksInstalled.compareAndSet(0, 1)) return
+
+    listOf(
+        "com.facebook.ads.RewardedVideoAd",
+        "com.facebook.ads.RewardedInterstitialAd",
+        "com.facebook.ads.RewardedVideoAd\$RewardedVideoAdLoadConfigBuilder",
+        "com.facebook.ads.RewardedInterstitialAd\$RewardedInterstitialAdLoadConfigBuilder"
+    ).forEach { cn -> runCatching { tryHookAudienceNetworkRewardClass(classLoader.loadClass(cn)) } }
+
+    (ClassLoader::class.java.declaredMethods + ClassLoader::class.java.methods)
+        .filter { m -> m.name == "loadClass" && m.parameterTypes.isNotEmpty() && m.parameterTypes[0] == String::class.java }
+        .distinctBy { m -> m.name + m.parameterTypes.joinToString { it.name } }
+        .forEach { m ->
+            m.isAccessible = true
+            XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val clazz = param.result as? Class<*> ?: return
+                    if (isAudienceNetworkRewardRelevantClass(clazz.name)) tryHookAudienceNetworkRewardClass(clazz)
+                }
+            })
+        }
+    XposedBridge.log("[$FB_TAG] Hooked Audience Network reward dynamic class fallback")
+}
+
+private fun tryHookAudienceNetworkRewardClass(clazz: Class<*>) {
+    val className = clazz.name
+    if (!isAudienceNetworkRewardRelevantClass(className) || !audienceNetworkRewardClassesHooked.add(className)) return
+    var hooked = 0
+    val methods = runCatching { clazz.declaredMethods + clazz.methods }.getOrDefault(emptyArray())
+    methods.distinctBy { m -> m.name + m.parameterTypes.joinToString { it.name } }.forEach { m ->
+        runCatching {
+            m.isAccessible = true
+            if (isAudienceNetworkRewardShowMethod(clazz, m)) {
+                XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val adObject = param.thisObject ?: return
+                        completeAudienceNetworkRewardObject(adObject)
+                        param.result = when (m.returnType) { Boolean::class.javaPrimitiveType, Boolean::class.java -> true; else -> null }
+                    }
+                }); hooked++
+            } else if (isAudienceNetworkRewardListenerRegistrationMethod(m)) {
+                XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) { rememberAudienceNetworkRewardListeners(param.thisObject, param.args, m) }
+                    override fun afterHookedMethod(param: MethodHookParam) { rememberAudienceNetworkRewardListeners(param.thisObject, param.args, m); rememberAudienceNetworkRewardListeners(param.result, param.args, m) }
+                }); hooked++
+            }
+        }
+    }
+    if (hooked > 0) XposedBridge.log("[$FB_TAG] Hooked $hooked Audience Network reward method(s) in $className")
 }
 
 // ─── Game ad payload helpers ──────────────────────────────────────────────────
 
 fun resolveGameAdPayload(target: Any?, payload: Any?, messageType: String? = null): Boolean {
     if (target == null || payload == null) return false
-    val promiseId     = extractPromiseId(payload) ?: return false
+    val promiseId = extractPromiseId(payload) ?: return false
     val resolveMethod = resolveGameAdResolveMethod(target.javaClass) ?: return false
     val successPayload = buildGameAdSuccessPayload(payload, messageType)
     return runCatching { resolveMethod.invoke(target, promiseId, successPayload); true }.getOrElse { false }
 }
 
-fun rejectGameAdPayload(target: Any?, payload: Any?): Boolean {
+fun rejectGameAdPayload(
+    target: Any?, payload: Any?,
+    message: String = GAME_AD_REJECTION_MESSAGE,
+    code: String = GAME_AD_REJECTION_CODE
+): Boolean {
     if (target == null || payload == null) return false
     resolveGameAdBridgeRejectMethod(target.javaClass)?.let { m ->
-        if (runCatching { m.invoke(target, GAME_AD_REJECTION_MESSAGE, GAME_AD_REJECTION_CODE, payload); true }.getOrElse { false }) return true
+        if (runCatching { m.invoke(target, message, code, payload); true }.getOrElse { false }) return true
     }
-    val promiseId    = extractPromiseId(payload) ?: return false
+    val promiseId = extractPromiseId(payload) ?: return false
     val rejectMethod = resolveGameAdRejectMethod(target.javaClass) ?: return false
-    return runCatching { rejectMethod.invoke(target, promiseId, GAME_AD_REJECTION_MESSAGE, GAME_AD_REJECTION_CODE); true }.getOrElse { false }
+    return runCatching { rejectMethod.invoke(target, promiseId, message, code); true }.getOrElse { false }
 }
+
+private fun rejectUnavailableGameAdPayloadIfNeeded(target: Any?, payload: Any?, messageType: String?): Boolean {
+    if (!shouldMakeGameAdUnavailable(payload, messageType)) return false
+    val rejected = rejectGameAdPayload(target, payload, GAME_AD_UNAVAILABLE_MESSAGE, GAME_AD_UNAVAILABLE_CODE)
+    if (rejected) { lastUnavailableGameAdMs.set(System.currentTimeMillis()); XposedBridge.log("[$FB_TAG] Marked rewarded game ad unavailable type=$messageType") }
+    return rejected
+}
+
+private fun shouldMakeGameAdUnavailable(payload: Any?, messageType: String?): Boolean {
+    if (messageType in GAME_AD_UNAVAILABLE_MESSAGE_TYPES) return true
+    if (messageType !in setOf("loadadasync", "showadasync")) return false
+    val content = extractGameAdContent(payload)
+    val knownType = content?.optString("adInstanceID")?.takeIf { it.isNotBlank() }?.let { gameAdInstanceTypes[it] }
+    if (knownType in GAME_AD_UNAVAILABLE_MESSAGE_TYPES) return true
+    val placementText = listOf(content?.optString("placementID"), content?.optString("adType"), content?.optString("type"), content?.optString("format"))
+        .joinToString(" ") { it.orEmpty() }.lowercase()
+    if (placementText.contains("reward")) return true
+    return payload?.toString()?.lowercase()?.contains("rewarded") == true
+}
+
+fun shouldAutofixGameAdMessage(messageType: String?) = messageType in GAME_AD_AUTOFIX_MESSAGE_TYPES
+
+private fun shouldBlockGameAdActivityLaunch(className: String): Boolean {
+    return className in HARD_BLOCKED_GAME_AD_ACTIVITY_CLASS_NAMES ||
+        (className in setOf(AUDIENCE_NETWORK_ACTIVITY_CLASS, AUDIENCE_NETWORK_REMOTE_ACTIVITY_CLASS) &&
+         lastUnavailableGameAdMs.get() > 0 && System.currentTimeMillis() - lastUnavailableGameAdMs.get() < GAME_AD_RECENT_WINDOW_MS)
+}
+
+private fun shouldConvertGameAdRejectToSuccess(promiseId: String, reason: String): Boolean {
+    val snapshot = gameAdPromiseSnapshots[promiseId]
+    if (shouldAutofixGameAdMessage(snapshot?.messageType)) return true
+    val closed = lastGameAdActivityCloseMs.get()
+    return closed > 0 && System.currentTimeMillis() - closed < 15_000L && reason.lowercase().contains("banner")
+}
+
+fun rememberGameAdPayload(target: Any?, payload: Any?, messageType: String?) {
+    if (target == null || payload !is JSONObject || messageType !in GAME_AD_MESSAGE_TYPES) return
+    val now = System.currentTimeMillis()
+    recentGameAdTargets[target] = now
+    val snapshotPayload = runCatching { JSONObject(payload.toString()) }.getOrNull() ?: payload
+    extractGameAdContent(snapshotPayload)?.optString("adInstanceID")?.takeIf { it.isNotBlank() }?.let { id ->
+        messageType?.let { gameAdInstanceTypes[id] = it }
+    }
+    extractPromiseId(snapshotPayload)?.let { promiseId ->
+        gameAdPromiseSnapshots.entries.removeIf { now - it.value.timestampMs > GAME_AD_PROMISE_WINDOW_MS }
+        gameAdPromiseSnapshots[promiseId] = GameAdPromiseSnapshot(snapshotPayload, messageType, now)
+    }
+    synchronized(recentGameAdPayloads) {
+        recentGameAdPayloads.removeAll { now - it.timestampMs > GAME_AD_RECENT_WINDOW_MS }
+        recentGameAdPayloads.add(GameAdPayloadSnapshot(target, snapshotPayload, messageType, now))
+        while (recentGameAdPayloads.size > 20) recentGameAdPayloads.removeAt(0)
+    }
+}
+
+fun completeRecentGameAdRequests(source: String) {
+    val now = System.currentTimeMillis()
+    val snapshots = synchronized(recentGameAdPayloads) {
+        recentGameAdPayloads.removeAll { now - it.timestampMs > GAME_AD_RECENT_WINDOW_MS }
+        recentGameAdPayloads.toList()
+    }
+    var resolved = 0
+    snapshots.asReversed().forEach { s ->
+        if (shouldAutofixGameAdMessage(s.messageType) && resolveGameAdPayload(s.target, s.payload, s.messageType)) {
+            dispatchPostResolveGameAdSignals(s.target, s.payload, s.messageType); resolved++
+        }
+    }
+    val targets = synchronized(recentGameAdTargets) {
+        recentGameAdTargets.entries.removeIf { now - it.value > GAME_AD_RECENT_WINDOW_MS }; recentGameAdTargets.keys.toList()
+    }
+    targets.forEach { t -> dispatchGameEvent(t, "hidebannerad", JSONObject().put("completed", true)) }
+    if (resolved > 0) XposedBridge.log("[$FB_TAG] Re-resolved $resolved recent game ad request(s) via $source")
+}
+
+private fun dispatchPostResolveGameAdSignals(target: Any?, payload: Any?, messageType: String?) {
+    if (messageType in setOf("loadbanneradasync", "hidebanneradasync")) {
+        val content = buildGameAdSuccessPayload(payload, messageType)
+        if (dispatchGameEvent(target, "hidebannerad", content)) XposedBridge.log("[$FB_TAG] Dispatched hidebannerad for type=$messageType")
+    }
+}
+
+fun buildGameAdSuccessPayload(payload: Any?, messageType: String? = null): JSONObject {
+    val effectiveType = messageType ?: (payload as? JSONObject)?.optString("type").orEmpty()
+    val content       = extractGameAdContent(payload)
+    val placementId   = content?.optString("placementID")?.takeIf { it.isNotBlank() }
+    val requestedInstId = content?.optString("adInstanceID")?.takeIf { it.isNotBlank() }
+    val bannerPosition = content?.optString("bannerPosition")?.takeIf { it.isNotBlank() }
+    val result = JSONObject()
+
+    result.put("success", true)
+    if (effectiveType.contains("reward", ignoreCase = true)) {
+        result.put("completed", true).put("didComplete", true).put("watched", true)
+              .put("rewarded", true).put("completionGesture", "post")
+    }
+    placementId?.let   { result.put("placementID", it) }
+    bannerPosition?.let { result.put("bannerPosition", it) }
+
+    val adInstanceId = when {
+        requestedInstId != null -> { gameAdInstanceIds.putIfAbsent(requestedInstId, requestedInstId); requestedInstId }
+        placementId != null && effectiveType != "loadbanneradasync" -> resolveGameAdInstanceId(placementId, effectiveType, bannerPosition)
+        else -> null
+    }
+    adInstanceId?.let { id ->
+        result.put("adInstanceID", id)
+        effectiveType.takeIf { it.isNotBlank() }?.let { gameAdInstanceTypes.putIfAbsent(id, it) }
+    }
+    return result
+}
+
+private fun forceGameAdSuccessResult(promiseId: String, original: Any?, payload: JSONObject?, messageType: String?): JSONObject {
+    val result = (original as? JSONObject)?.let { copyJsonObject(it) } ?: JSONObject()
+    val success = buildGameAdSuccessPayload(payload ?: JSONObject().put("content", JSONObject().put("promiseID", promiseId)), messageType)
+    val keys = success.keys(); while (keys.hasNext()) { val k = keys.next(); result.put(k, success.opt(k)) }
+    result.put("success", true)
+    if (messageType?.contains("reward", ignoreCase = true) == true)
+        result.put("completed", true).put("didComplete", true).put("watched", true).put("rewarded", true).put("completionGesture", "post")
+    return result
+}
+
+private fun inferGameAdMessageType(method: Method, payload: Any?): String? {
+    val payloadType = (payload as? JSONObject)?.optString("type")?.takeIf { it.isNotBlank() }
+    if (payloadType != null) return payloadType
+    return when (method.name) {
+        "D3s" -> "getinterstitialadasync"; "D3x" -> "getrewardedinterstitialasync"
+        "D3z" -> "getrewardedvideoasync"; "D55" -> "hidebanneradasync"
+        "D9v" -> "loadadasync"; "D9x" -> "loadbanneradasync"; "DX0" -> "showadasync"
+        else -> null
+    }
+}
+
+private fun gameAdPromiseTypeFromReason(reason: String): String? {
+    val n = reason.lowercase()
+    return when {
+        n.contains("reward") && n.contains("interstitial") -> "getrewardedinterstitialasync"
+        n.contains("reward") -> "getrewardedvideoasync"
+        n.contains("interstitial") -> "getinterstitialadasync"
+        n.contains("banner") -> "loadbanneradasync"
+        n.contains("show") || n.contains("watch") || n.contains("complete") -> "showadasync"
+        n.contains("load") -> "loadadasync"
+        else -> null
+    }
+}
+
+// ─── Activity helpers ─────────────────────────────────────────────────────────
+
+private fun handleGameAdActivity(activity: Activity, source: String) {
+    when (activity.javaClass.name) {
+        AUDIENCE_NETWORK_ACTIVITY_CLASS, AUDIENCE_NETWORK_REMOTE_ACTIVITY_CLASS -> {
+            forceAudienceNetworkRewardCompletion(activity, source)
+            finishGameAdActivity(activity, source)
+        }
+        else -> finishGameAdActivity(activity, source)
+    }
+}
+
+private fun finishGameAdActivity(activity: Activity, source: String) {
+    if (activity.isFinishing) return
+    lastGameAdActivityCloseMs.set(System.currentTimeMillis())
+    completeRecentGameAdRequests(source)
+    if (activity.javaClass.name in GAME_AD_ACTIVITY_CLASS_NAMES) {
+        activity.setResult(Activity.RESULT_OK, Intent().apply { putExtra("success", true) })
+    } else {
+        activity.setResult(Activity.RESULT_CANCELED, Intent())
+    }
+    activity.finish()
+    XposedBridge.log("[$FB_TAG] Closed game ad activity ${activity.javaClass.name} via $source")
+}
+
+private fun forceAudienceNetworkRewardCompletion(activity: Activity, source: String) {
+    val seen = IdentityHashMap<Any, Boolean>()
+    val queue = java.util.ArrayDeque<Pair<Any, Int>>()
+    queue.add(activity to 0)
+    var inspected = 0; var invoked = 0
+    while (!queue.isEmpty() && inspected < 96) {
+        val (value, depth) = queue.removeFirst()
+        if (seen.put(value, true) != null) continue; inspected++
+        invoked += invokeAudienceNetworkRewardCompletionMethods(value)
+        if (depth >= 5) continue
+        audienceNetworkFieldsFor(value.javaClass).forEach { f ->
+            val fv = runCatching { f.get(value) }.getOrNull() ?: return@forEach
+            when (fv) {
+                is Iterable<*> -> fv.take(12).forEach { item -> if (item != null && shouldTraverseAudienceNetworkObject(item)) queue.add(item to depth + 1) }
+                is Array<*>    -> fv.take(12).forEach { item -> if (item != null && shouldTraverseAudienceNetworkObject(item)) queue.add(item to depth + 1) }
+                else -> if (shouldTraverseAudienceNetworkObject(fv)) queue.add(fv to depth + 1)
+            }
+        }
+    }
+    XposedBridge.log("[$FB_TAG] Forced AN reward callbacks invoked=$invoked inspected=$inspected via $source")
+}
+
+private fun invokeAudienceNetworkRewardCompletionMethods(target: Any): Int {
+    var invoked = 0
+    audienceNetworkMethodsFor(target.javaClass).filter { m ->
+        !Modifier.isStatic(m.modifiers) && m.parameterCount == 0 &&
+        (m.name in AUDIENCE_NETWORK_REWARD_COMPLETION_METHOD_NAMES || (m.name.contains("Reward", ignoreCase = true) && m.name.contains("Complete", ignoreCase = true)))
+    }.forEach { m -> runCatching { m.invoke(target); invoked++ } }
+    return invoked
+}
+
+private fun completeAudienceNetworkRewardObject(adObject: Any) {
+    val listeners = LinkedHashSet<Any>()
+    synchronized(audienceNetworkRewardAdListeners) { audienceNetworkRewardAdListeners[adObject]?.let { listeners.add(it) } }
+    listeners.addAll(findAudienceNetworkRewardListeners(adObject))
+    listeners.forEach { listener -> invokeAudienceNetworkRewardListenerCallbacks(listener, adObject) }
+}
+
+private fun invokeAudienceNetworkRewardListenerCallbacks(listener: Any, adObject: Any) {
+    val groups = listOf(
+        setOf("onAdLoaded","onLoggingImpression","onInterstitialDisplayed"),
+        setOf("onRewardedVideoCompleted","onRewardedAdCompleted","onRewardedInterstitialCompleted","onAdComplete","onAdCompleted"),
+        setOf("onRewardedVideoClosed","onRewardedInterstitialClosed","onAdClosed","onInterstitialDismissed")
+    )
+    groups.forEach { group ->
+        audienceNetworkMethodsFor(listener.javaClass).filter { m -> m.name in group }.forEach { m ->
+            val args = when (m.parameterCount) { 0 -> emptyArray(); 1 -> if (m.parameterTypes[0].isAssignableFrom(adObject.javaClass)) arrayOf(adObject) else null; else -> null } ?: return@forEach
+            runCatching { m.invoke(listener, *args) }
+        }
+    }
+}
+
+private fun findAudienceNetworkRewardListeners(root: Any?): List<Any> {
+    if (root == null) return emptyList()
+    val listeners = LinkedHashSet<Any>(); val seen = IdentityHashMap<Any, Boolean>()
+    val queue = java.util.ArrayDeque<Pair<Any, Int>>(); queue.add(root to 0)
+    var inspected = 0
+    while (!queue.isEmpty() && inspected < 96 && listeners.size < 8) {
+        val (value, depth) = queue.removeFirst()
+        if (seen.put(value, true) != null) continue; inspected++
+        if (value !== root && isAudienceNetworkRewardListenerObject(value)) { listeners.add(value); continue }
+        if (depth >= 5 || !shouldTraverseAudienceNetworkObject(value)) continue
+        audienceNetworkFieldsFor(value.javaClass).forEach { f ->
+            val fv = runCatching { f.get(value) }.getOrNull() ?: return@forEach
+            when (fv) {
+                is Iterable<*> -> fv.take(12).forEach { item -> if (item != null && (isAudienceNetworkRewardListenerObject(item) || shouldTraverseAudienceNetworkObject(item))) queue.add(item to depth + 1) }
+                is Array<*>    -> fv.take(12).forEach { item -> if (item != null && (isAudienceNetworkRewardListenerObject(item) || shouldTraverseAudienceNetworkObject(item))) queue.add(item to depth + 1) }
+                else -> if (isAudienceNetworkRewardListenerObject(fv) || shouldTraverseAudienceNetworkObject(fv)) queue.add(fv to depth + 1)
+            }
+        }
+    }
+    return listeners.toList()
+}
+
+private fun rememberAudienceNetworkRewardListeners(owner: Any?, args: Array<Any?>?, method: Method) {
+    if (owner == null || args == null) return
+    args.forEach { arg ->
+        if (arg != null && isAudienceNetworkRewardListenerObject(arg)) {
+            audienceNetworkRewardAdListeners[owner] = arg
+        } else {
+            findAudienceNetworkRewardListeners(arg).firstOrNull()?.let { audienceNetworkRewardAdListeners[owner] = it }
+        }
+    }
+}
+
+private fun isAudienceNetworkRewardListenerObject(value: Any?): Boolean {
+    if (value == null) return false
+    val cn = value.javaClass.name.lowercase()
+    if (cn.contains("listener") && (cn.contains("reward") || cn.contains("ad"))) return true
+    return audienceNetworkMethodsFor(value.javaClass).any { m -> m.name in AUDIENCE_NETWORK_REWARD_COMPLETION_METHOD_NAMES || m.name.contains("Reward", ignoreCase = true) }
+}
+
+private fun isAudienceNetworkRewardRelevantClass(className: String): Boolean {
+    val n = className.lowercase()
+    return (n.startsWith("com.facebook.ads.") || n.startsWith("com.facebook.audiencenetwork.") || n.contains("audiencenetwork")) &&
+           (n.contains("reward") || n.contains("adlistener") || n.contains("adconfig") || n.endsWith(".ad"))
+}
+
+private fun isAudienceNetworkRewardShowMethod(clazz: Class<*>, method: Method) =
+    clazz.name.lowercase().contains("reward") && method.name == "show" && !Modifier.isStatic(method.modifiers) && method.parameterCount <= 1
+
+private fun isAudienceNetworkRewardListenerRegistrationMethod(method: Method): Boolean {
+    if (Modifier.isStatic(method.modifiers) || method.parameterCount == 0) return false
+    if (method.name.lowercase().contains("listener")) return true
+    return method.parameterTypes.any { t -> t.name.lowercase().contains("listener") && (t.name.lowercase().contains("reward") || t.name.lowercase().contains("ad")) }
+}
+
+private fun shouldTraverseAudienceNetworkObject(value: Any): Boolean {
+    val cn = value.javaClass.name.lowercase()
+    return cn.startsWith("com.facebook.ads.") || cn.startsWith("com.facebook.audiencenetwork.") ||
+           cn.contains("audiencenetwork") || cn.contains("reward") || cn.contains("interstitial") ||
+           cn.contains("fullscreen") || cn.contains("listener") || cn.contains(".ads.")
+}
+
+private fun audienceNetworkFieldsFor(type: Class<*>): List<Field> {
+    val list = ArrayList<Field>(); var cur: Class<*>? = type
+    while (cur != null && cur != Any::class.java && cur != Activity::class.java && list.size < 48) {
+        cur.declaredFields.forEach { f -> if (!Modifier.isStatic(f.modifiers) && list.size < 48) { f.isAccessible = true; list.add(f) } }; cur = cur.superclass
+    }; return list
+}
+
+private fun audienceNetworkMethodsFor(type: Class<*>): List<Method> {
+    val map = LinkedHashMap<String, Method>(); var cur: Class<*>? = type
+    while (cur != null && cur != Any::class.java && cur != Activity::class.java) {
+        cur.declaredMethods.forEach { m -> if (!Modifier.isStatic(m.modifiers)) { m.isAccessible = true; map.putIfAbsent("${cur.name}.${m.name}/${m.parameterCount}", m) } }; cur = cur.superclass
+    }; return map.values.toList()
+}
+
+// ─── Native ad view helpers ───────────────────────────────────────────────────
+
+private val GAME_AD_WEBVIEW_HIDE_SCRIPT = """
+(function(){
+  if (window.__nexalloyFbAdSweep) return; window.__nexalloyFbAdSweep = true;
+  function isAd(el) {
+    var t = (el.innerText || el.textContent || '').toLowerCase();
+    var a = ((el.id || '') + ' ' + (el.className || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();
+    if (t.indexOf('ads served by meta') >= 0 || t.indexOf('ad choices') >= 0) return true;
+    return /audiencenetwork|adchoices|fbinstant.*ad|banner.?ad|ad.?banner|ad-container|ad_container|sponsored/.test(a);
+  }
+  function sweep() { try { document.querySelectorAll('iframe,div,section,aside,[id],[class]').forEach(function(el){ if(isAd(el)) { el.style.setProperty('display','none','important'); } }); } catch(e){} }
+  sweep(); new MutationObserver(sweep).observe(document.documentElement||document.body,{childList:true,subtree:true}); setInterval(sweep,1000);
+})();
+""".trimIndent()
+
+private fun injectGameAdHidingScript(webView: WebView) {
+    webView.post { runCatching { webView.evaluateJavascript(GAME_AD_WEBVIEW_HIDE_SCRIPT, null) } }
+}
+
+private fun hideLikelyGameAdContainer(view: View) {
+    runCatching {
+        if (view.visibility != View.GONE) { view.visibility = View.GONE }
+        view.minimumHeight = 0
+        view.layoutParams?.let { p -> p.height = 0; view.layoutParams = p }
+        view.requestLayout()
+    }
+}
+
+private fun isPotentialNativeGameAdView(view: View?): Boolean {
+    val cn = view?.javaClass?.name?.lowercase() ?: return false
+    return cn == "com.facebook.ads.adview" || (cn.endsWith(".adview") && (cn.startsWith("com.facebook.ads.") || cn.contains("audiencenetwork"))) || cn.contains("adchoices")
+}
+
+private fun isGameAdMarkerText(value: CharSequence?): Boolean {
+    if (value.isNullOrBlank()) return false
+    val n = value.toString().lowercase()
+    return n.contains("ads served by meta") || n.contains("ad choices") || n.contains("adchoices")
+}
+
+// ─── Resolve / reject helpers ─────────────────────────────────────────────────
 
 private fun resolveGameAdResolveMethod(type: Class<*>?): Method? {
     if (type == null) return null
@@ -662,66 +1206,85 @@ private fun resolveGameAdBridgeRejectMethod(type: Class<*>?): Method? {
     if (type == null) return null
     return (type.declaredMethods + type.methods).firstOrNull { m ->
         !Modifier.isStatic(m.modifiers) && m.returnType == Void.TYPE && m.parameterCount == 3 &&
-        m.parameterTypes[0] == String::class.java && m.parameterTypes[1] == String::class.java &&
-        m.parameterTypes[2] == JSONObject::class.java
+        m.parameterTypes[0] == String::class.java && m.parameterTypes[1] == String::class.java && m.parameterTypes[2] == JSONObject::class.java
     }?.apply { isAccessible = true }
 }
 
 private fun resolveGameAdRejectMethod(type: Class<*>?): Method? {
     if (type == null) return null
     return (type.declaredMethods + type.methods).firstOrNull { m ->
-        !Modifier.isStatic(m.modifiers) && m.returnType == Void.TYPE &&
-        m.parameterCount == 3 && m.parameterTypes.all { it == String::class.java }
+        !Modifier.isStatic(m.modifiers) && m.returnType == Void.TYPE && m.parameterCount == 3 && m.parameterTypes.all { it == String::class.java }
     }?.apply { isAccessible = true }
 }
 
-fun buildGameAdSuccessPayload(payload: Any?, messageType: String? = null): JSONObject {
-    val effectiveType      = messageType ?: (payload as? JSONObject)?.optString("type").orEmpty()
-    val content            = (payload as? JSONObject)?.optJSONObject("content")
-    val placementId        = content?.optString("placementID")?.takeIf { it.isNotBlank() }
-    val requestedInstId    = content?.optString("adInstanceID")?.takeIf { it.isNotBlank() }
-    val bannerPosition     = content?.optString("bannerPosition")?.takeIf { it.isNotBlank() }
-    val result             = JSONObject()
-    placementId?.let   { result.put("placementID", it) }
-    bannerPosition?.let { result.put("bannerPosition", it) }
-    val adInstanceId = when {
-        requestedInstId != null -> { gameAdInstanceIds.putIfAbsent(requestedInstId, requestedInstId); requestedInstId }
-        placementId != null && effectiveType != "loadbanneradasync" -> resolveGameAdInstanceId(placementId, effectiveType, bannerPosition)
-        else -> null
-    }
-    adInstanceId?.let { result.put("adInstanceID", it) }
-    return result
+private fun dispatchGameEvent(target: Any?, eventType: String, content: Any?): Boolean {
+    if (target == null) return false
+    val method = resolveGameEventDispatchMethod(target.javaClass) ?: return false
+    val eventValue = resolveGameEventValue(method.parameterTypes[0], eventType) ?: return false
+    return runCatching { method.invoke(target, eventValue, content ?: JSONObject.NULL); true }.getOrElse { false }
 }
 
-private fun resolveGameAdInstanceId(placementId: String, messageType: String?, bannerPosition: String?): String {
-    val key = listOf(messageType.orEmpty(), placementId, bannerPosition.orEmpty()).joinToString("|")
-    return gameAdInstanceIds.computeIfAbsent(key) {
-        "${GAME_AD_SUCCESS_INSTANCE_PREFIX}_${key.hashCode().toLong() and 0xffffffffL}"
-    }
+private fun resolveGameEventDispatchMethod(type: Class<*>?): Method? {
+    if (type == null) return null
+    return (type.declaredMethods + type.methods).firstOrNull { m ->
+        !Modifier.isStatic(m.modifiers) && m.returnType == Void.TYPE && m.parameterCount == 2 &&
+        m.parameterTypes[0] != String::class.java && m.parameterTypes[1] == Any::class.java
+    }?.apply { isAccessible = true }
+}
+
+private fun resolveGameEventValue(eventType: Class<*>, eventName: String): Any? {
+    val valuesMethod = (eventType.declaredMethods + eventType.methods).firstOrNull { m ->
+        Modifier.isStatic(m.modifiers) && m.parameterCount == 0 && m.returnType.isArray && m.returnType.componentType == eventType
+    }?.apply { isAccessible = true }
+    val values = runCatching { valuesMethod?.invoke(null) as? Array<*> }.getOrNull().orEmpty()
+    values.firstOrNull { it?.toString() == eventName }?.let { return it }
+    return eventType.declaredFields.firstOrNull { f ->
+        Modifier.isStatic(f.modifiers) && f.type == eventType &&
+        runCatching { f.isAccessible = true; f.get(null)?.toString() == eventName }.getOrDefault(false)
+    }?.let { f -> runCatching { f.get(null) }.getOrNull() }
 }
 
 fun extractPromiseId(payload: Any?): String? {
     val jClass = payload?.javaClass ?: return null
     if (jClass.name != "org.json.JSONObject") return null
     val getJSONObject = (jClass.declaredMethods + jClass.methods).firstOrNull { m -> m.name == "getJSONObject" && m.parameterCount == 1 && m.parameterTypes[0] == String::class.java }?.apply { isAccessible = true } ?: return null
-    val getString     = (jClass.declaredMethods + jClass.methods).firstOrNull { m -> m.name == "getString"     && m.parameterCount == 1 && m.parameterTypes[0] == String::class.java }?.apply { isAccessible = true } ?: return null
-    val content       = runCatching { getJSONObject.invoke(payload, "content") }.getOrNull() ?: return null
+    val getString = (jClass.declaredMethods + jClass.methods).firstOrNull { m -> m.name == "getString" && m.parameterCount == 1 && m.parameterTypes[0] == String::class.java }?.apply { isAccessible = true } ?: return null
+    val content = runCatching { getJSONObject.invoke(payload, "content") }.getOrNull() ?: return null
     return runCatching { getString.invoke(content, "promiseID") as? String }.getOrNull()
 }
 
-private fun finishGameAdActivity(activity: Activity) {
-    if (activity.isFinishing) return
-    activity.setResult(Activity.RESULT_CANCELED)
-    activity.finish()
+private fun extractGameAdContent(payload: Any?): JSONObject? = (payload as? JSONObject)?.optJSONObject("content")
+
+private fun buildGameAdPayloadFromServiceBundle(bundle: Bundle, messageType: String): JSONObject =
+    JSONObject().put("type", messageType).put("content", bundleToJsonObject(bundle))
+
+private fun bundleToJsonObject(bundle: Bundle): JSONObject {
+    val json = JSONObject()
+    runCatching { bundle.keySet().toList() }.getOrDefault(emptyList()).forEach { key ->
+        when (val v = runCatching { bundle.get(key) }.getOrNull()) {
+            null -> json.put(key, JSONObject.NULL)
+            is String -> json.put(key, v); is Boolean -> json.put(key, v); is Number -> json.put(key, v)
+            is JSONObject -> json.put(key, v); is Bundle -> json.put(key, bundleToJsonObject(v))
+            else -> json.put(key, v.toString())
+        }
+    }; return json
+}
+
+private fun resolveGameAdInstanceId(placementId: String, messageType: String?, bannerPosition: String?): String {
+    val key = listOf(messageType.orEmpty(), placementId, bannerPosition.orEmpty()).joinToString("|")
+    return gameAdInstanceIds.computeIfAbsent(key) { "${GAME_AD_SUCCESS_INSTANCE_PREFIX}_${key.hashCode().toLong() and 0xffffffffL}" }
+}
+
+private fun copyJsonObject(source: JSONObject): JSONObject {
+    val result = JSONObject(); val keys = source.keys()
+    while (keys.hasNext()) { val k = keys.next(); result.put(k, source.opt(k)) }; return result
 }
 
 // ─── List / result manipulation helpers ──────────────────────────────────────
 
 fun filterAdItems(list: MutableList<Any?>, inspector: AdStoryInspector): Int {
-    var removed = 0
-    val it = list.iterator()
-    while (it.hasNext()) { if (inspector.containsAdStory(it.next())) { it.remove(); removed++ } }
-    return removed
+    var removed = 0; val it = list.iterator()
+    while (it.hasNext()) { if (inspector.containsAdStory(it.next())) { it.remove(); removed++ } }; return removed
 }
 
 fun buildImmutableListLike(sample: Any?, items: List<Any?>): Any? {
@@ -733,10 +1296,8 @@ fun buildImmutableListLike(sample: Any?, items: List<Any?>): Any? {
 }
 
 fun replaceFeedItemsInResult(param: XC_MethodHook.MethodHookParam, items: List<Any?>): Boolean {
-    val result  = param.result ?: return false
-    val rebuilt = rebuildFeedResult(result, items) ?: return false
-    param.result = rebuilt
-    return true
+    val result = param.result ?: return false; val rebuilt = rebuildFeedResult(result, items) ?: return false
+    param.result = rebuilt; return true
 }
 
 private fun rebuildFeedResult(result: Any, items: List<Any?>): Any? {
@@ -751,10 +1312,8 @@ private fun rebuildFeedResult(result: Any, items: List<Any?>): Any? {
     val stats        = runCatching { intArrayField.get(result) as? IntArray }.getOrNull()?.clone() ?: return null
     val ints         = intFields.map { f -> runCatching { f.getInt(result) }.getOrNull() ?: return null }
     val ctor = type.declaredConstructors.firstOrNull { c ->
-        c.parameterCount == 5 &&
-        c.parameterTypes.getOrNull(0)?.name == "com.google.common.collect.ImmutableList" &&
-        c.parameterTypes.getOrNull(1) == IntArray::class.java &&
-        c.parameterTypes.drop(2).all { it == Int::class.javaPrimitiveType }
+        c.parameterCount == 5 && c.parameterTypes.getOrNull(0)?.name == "com.google.common.collect.ImmutableList" &&
+        c.parameterTypes.getOrNull(1) == IntArray::class.java && c.parameterTypes.drop(2).all { it == Int::class.javaPrimitiveType }
     } ?: return null
     ctor.isAccessible = true
     return runCatching { ctor.newInstance(rebuiltList, stats, ints[0], ints[1], ints[2]) }.getOrNull()
@@ -772,27 +1331,26 @@ fun extractFeedItemsFromResult(result: Any?): Iterable<*>? {
 // ─── Sponsored pool result type helpers ──────────────────────────────────────
 
 fun isSponsoredResultCarrier(type: Class<*>): Boolean {
-    val ctor       = type.declaredConstructors.firstOrNull { it.parameterCount == 2 } ?: return false
+    val ctor = type.declaredConstructors.firstOrNull { it.parameterCount == 2 } ?: return false
     val reasonType = ctor.parameterTypes.getOrNull(1) ?: return false
     return reasonType.enumConstants?.any { it.toString() == "SPONSORED_GET_NEXT_RETURN_NULL" } == true
 }
 
 fun buildSponsoredEmptyResult(type: Class<*>): Any? {
-    val ctor       = type.declaredConstructors.firstOrNull { it.parameterCount == 2 } ?: return null
+    val ctor = type.declaredConstructors.firstOrNull { it.parameterCount == 2 } ?: return null
     val reasonType = ctor.parameterTypes.getOrNull(1) ?: return null
     val emptyReason = reasonType.enumConstants?.firstOrNull { it.toString() == "SPONSORED_GET_NEXT_RETURN_NULL" }
         ?: reasonType.enumConstants?.firstOrNull { it.toString() == "FAIL" } ?: return null
-    ctor.isAccessible = true
-    return runCatching { ctor.newInstance(null, emptyReason) }.getOrNull()
+    ctor.isAccessible = true; return runCatching { ctor.newInstance(null, emptyReason) }.getOrNull()
 }
 
 // ─── Litho render method detection ───────────────────────────────────────────
 
 fun resolveLithoRenderMethod(componentClass: Class<*>): Method? =
     componentClass.declaredMethods.firstOrNull { m ->
-        !Modifier.isStatic(m.modifiers) && !m.isBridge && !m.isSynthetic &&
-        m.parameterCount == 1 && !m.returnType.isPrimitive && m.returnType != Void.TYPE &&
-        m.returnType != Any::class.java && m.returnType.isAssignableFrom(componentClass)
+        !Modifier.isStatic(m.modifiers) && !m.isBridge && !m.isSynthetic && m.parameterCount == 1 &&
+        !m.returnType.isPrimitive && m.returnType != Void.TYPE && m.returnType != Any::class.java &&
+        m.returnType.isAssignableFrom(componentClass)
     }?.apply { isAccessible = true }
 
 // ─── Story ad provider resolution ────────────────────────────────────────────
@@ -807,13 +1365,13 @@ fun resolveStoryAdProviderHooks(providerClass: Class<*>, includeInsertionTrigger
     }?.apply { isAccessible = true }
     val fetchMoreAdsMethod = methods.firstOrNull { m ->
         !Modifier.isStatic(m.modifiers) && m.parameterCount == 2 && m.returnType == Void.TYPE &&
-        m.parameterTypes[0].name == "com.google.common.collect.ImmutableList" &&
-        m.parameterTypes[1] == Int::class.javaPrimitiveType
+        m.parameterTypes[0].name == "com.google.common.collect.ImmutableList" && m.parameterTypes[1] == Int::class.javaPrimitiveType
     }?.apply { isAccessible = true }
     val deferredUpdateMethod = methods.firstOrNull { m ->
         !Modifier.isStatic(m.modifiers) && m.parameterCount == 2 && m.returnType == Void.TYPE &&
         m.parameterTypes[1].name == "com.google.common.collect.ImmutableList"
     }?.apply { isAccessible = true }
+    // insertionTrigger: method that logs/uses "ads_insertion" string
     val insertionTriggerMethod = if (!includeInsertionTrigger) null else {
         methods.firstOrNull { m -> !Modifier.isStatic(m.modifiers) && m.parameterCount == 0 && m.returnType == Void.TYPE }
             ?.apply { isAccessible = true }
