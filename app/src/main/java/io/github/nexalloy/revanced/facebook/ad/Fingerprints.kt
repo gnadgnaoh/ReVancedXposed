@@ -6,8 +6,6 @@ import io.github.nexalloy.morphe.findMethodListDirect
 import java.lang.reflect.Modifier
 
 // ─── Ad-kind enum ─────────────────────────────────────────────────────────────
-// Enum whose constants include "AD", "UGC", "PARADE", "MIDCARD".
-// Used by AdStoryInspector to recognise ad-backed story objects.
 
 val adKindEnumFingerprint = findClassDirect {
     findClass {
@@ -15,12 +13,18 @@ val adKindEnumFingerprint = findClassDirect {
     }.first()
 }
 
-// ─── Reels / story list builder ───────────────────────────────────────────────
-// Owns two static factory methods:
-//   append : (X, X, X, X, X, java.util.List) -> void    [6 params]
-//   factory: (X, X, X, X, boolean)           -> ArrayList [5 params]
+// ─── Reels list-builder ───────────────────────────────────────────────────────
+// Primary: class that logs "Non ads story fall into ads rendering logic"
+// Fallback: structural signature (static 6-param void + static 5-param ArrayList)
 
 val listBuilderClassFingerprint = findClassDirect {
+    // Primary: string-based
+    val byString = findClass {
+        matcher { usingStrings("Non ads story fall into ads rendering logic, StoryType=%s, StoryId=%s") }
+    }.firstOrNull()
+    if (byString != null) return@findClassDirect byString
+
+    // Fallback: structural
     findMethod {
         matcher {
             modifiers = Modifier.STATIC
@@ -29,10 +33,8 @@ val listBuilderClassFingerprint = findClassDirect {
         }
     }.first { md ->
         md.declaredClass?.methods?.any { m ->
-            m.isMethod &&
-            (m.modifiers and Modifier.STATIC) != 0 &&
-            m.paramCount == 5 &&
-            m.paramTypeNames.getOrNull(4) == "boolean"
+            m.isMethod && (m.modifiers and Modifier.STATIC) != 0 &&
+            m.paramCount == 5 && m.paramTypeNames.getOrNull(4) == "boolean"
         } == true
     }.declaredClass!!
 }
@@ -49,53 +51,41 @@ val listBuilderAppendFingerprint = findMethodDirect {
 
 val listBuilderFactoryFingerprint = findMethodDirect {
     listBuilderClassFingerprint().findMethod {
-        matcher {
-            modifiers = Modifier.STATIC
-            paramCount = 5
-        }
+        matcher { modifiers = Modifier.STATIC; paramCount = 5 }
     }.first { it.paramTypeNames.getOrNull(4) == "boolean" }
 }
 
-// ─── Plugin pack ──────────────────────────────────────────────────────────────
-// FbShortsViewerPluginPack – returns the plugin list for a story.
+// ─── Plugin packs ─────────────────────────────────────────────────────────────
+// Upstream now blocks BOTH FbShortsViewerPluginPack AND MarketplaceAdsPluginPack.
 
-val pluginPackMethodFingerprint = findMethodDirect {
-    findMethod {
-        matcher {
-            returnType = "java.lang.String"
-            paramCount = 0
-            usingStrings("FbShortsViewerPluginPack")
+val pluginPackMethodsFingerprint = findMethodListDirect {
+    listOf("FbShortsViewerPluginPack", "MarketplaceAdsPluginPack").flatMap { tag ->
+        findClass {
+            matcher {
+                methods {
+                    add { returnType = "java.lang.String"; paramCount = 0; usingStrings(tag) }
+                    add { returnType = "java.util.List"; paramCount = 0 }
+                }
+            }
+        }.flatMap { cls ->
+            cls.findMethod { matcher { returnType = "java.util.List"; paramCount = 0 } }
         }
-    }.first().declaredClass!!.findMethod {
-        matcher {
-            returnType = "java.util.List"
-            paramCount = 0
-        }
-    }.single()
+    }.distinctBy { it.descriptor }.filter { !it.isConstructor }
 }
 
 // ─── Instream banner eligibility ─────────────────────────────────────────────
 
 val instreamBannerEligibilityFingerprint = findMethodDirect {
     findMethod {
-        matcher {
-            returnType = "boolean"
-            paramCount = 0
-            usingStrings("InstreamAdIdleWithBannerState")
-        }
-    }.first()
+        matcher { returnType = "boolean"; paramCount = 0; usingStrings("InstreamAdIdleWithBannerState") }
+    }.first { !it.isConstructor }
 }
 
 // ─── Indicator pill eligibility ──────────────────────────────────────────────
 
 val indicatorPillAdEligibilityFingerprint = findMethodDirect {
     findMethod {
-        matcher {
-            modifiers = Modifier.STATIC
-            returnType = "boolean"
-            paramCount = 3
-            usingStrings("ReelsAdsFloatingCtaPlugin")
-        }
+        matcher { modifiers = Modifier.STATIC; returnType = "boolean"; paramCount = 3; usingStrings("ReelsAdsFloatingCtaPlugin") }
     }.first()
 }
 
@@ -104,10 +94,7 @@ val indicatorPillAdEligibilityFingerprint = findMethodDirect {
 val reelsBannerRenderMethodsFingerprint = findMethodListDirect {
     listOf("ReelsBannerAdsComponent", "ReelsBannerAdsNativeComponent").flatMap { tag ->
         findMethod {
-            matcher {
-                paramCount = 1
-                usingStrings(tag)
-            }
+            matcher { paramCount = 1; usingStrings(tag) }
         }.filter { m -> !m.isConstructor }
     }.distinctBy { it.descriptor }
 }
@@ -115,7 +102,7 @@ val reelsBannerRenderMethodsFingerprint = findMethodListDirect {
 // ─── Feed CSR cache filter ────────────────────────────────────────────────────
 
 val feedCsrFilterMethodsFingerprint = findMethodListDirect {
-    listOf("FeedCSRCacheFilter", "FeedCSRCacheFilter2025", "FeedCSRCacheFilter2026").flatMap { tag ->
+    listOf("FeedCSRCacheFilter", "FeedCSRCacheFilter2025H1", "FeedCSRCacheFilter2026H1").flatMap { tag ->
         findClass {
             matcher { usingStrings(tag) }
         }.flatMap { cls ->
@@ -138,43 +125,24 @@ val feedCsrFilterMethodsFingerprint = findMethodListDirect {
 val lateFeedListMethodsFingerprint = findMethodListDirect {
     val results = ArrayList<org.luckypray.dexkit.result.MethodData>()
 
-    findClass {
-        matcher { usingStrings("handleStorageStories", "Empty Storage List") }
-    }.forEach { cls ->
+    findClass { matcher { usingStrings("handleStorageStories", "Empty Storage List") } }.forEach { cls ->
         cls.findMethod {
-            matcher {
-                returnType = "void"
-                paramTypes(null, "com.google.common.collect.ImmutableList", "int")
-            }
+            matcher { returnType = "void"; paramTypes(null, "com.google.common.collect.ImmutableList", "int") }
         }.forEach { results.add(it) }
     }
 
-    findClass {
-        matcher { usingStrings("cancelVendingTimerAndAddToPool_") }
-    }.forEach { cls ->
+    findClass { matcher { usingStrings("cancelVendingTimerAndAddToPool_") } }.forEach { cls ->
         cls.findMethod {
-            matcher {
-                returnType = "void"
-                paramTypes("com.google.common.collect.ImmutableList", "java.lang.String")
-            }
+            matcher { returnType = "void"; paramTypes("com.google.common.collect.ImmutableList", "java.lang.String") }
         }.forEach { results.add(it) }
     }
 
-    listOf(
-        "CSRNoOpStorageLifecycleImpl", "FeedCSRStorageLifecycle",
-        "FriendlyFeedCSRStorageLifecycle", "FbShortsCSRStorageLifecycle"
-    ).forEach { tag ->
-        findClass {
-            matcher { usingStrings(tag) }
-        }.forEach { cls ->
+    listOf("CSRNoOpStorageLifecycleImpl", "FeedCSRStorageLifecycle", "FriendlyFeedCSRStorageLifecycle", "FbShortsCSRStorageLifecycle").forEach { tag ->
+        findClass { matcher { usingStrings(tag) } }.forEach { cls ->
             cls.findMethod {
                 matcher {
                     returnType = "void"
-                    paramTypes(
-                        "com.facebook.auth.usersession.FbUserSession",
-                        null,
-                        "com.google.common.collect.ImmutableList"
-                    )
+                    paramTypes("com.facebook.auth.usersession.FbUserSession", null, "com.google.common.collect.ImmutableList")
                 }
             }.forEach { results.add(it) }
         }
@@ -187,15 +155,8 @@ val lateFeedListMethodsFingerprint = findMethodListDirect {
 
 val storyPoolAddMethodsFingerprint = findMethodListDirect {
     listOf("CSRStoryPoolCoordinator", "FeedStoryPoolCoordinator").flatMap { tag ->
-        findClass {
-            matcher { usingStrings(tag) }
-        }.flatMap { cls ->
-            cls.findMethod {
-                matcher {
-                    returnType = "boolean"
-                    paramCount = 1
-                }
-            }
+        findClass { matcher { usingStrings(tag) } }.flatMap { cls ->
+            cls.findMethod { matcher { returnType = "boolean"; paramCount = 1 } }
         }
     }.distinctBy { it.descriptor }.filter { !it.isConstructor }
 }
@@ -214,10 +175,7 @@ val sponsoredPoolClassFingerprint = findClassDirect {
 
 val sponsoredPoolAddMethodFingerprint = findMethodDirect {
     sponsoredPoolClassFingerprint().findMethod {
-        matcher {
-            returnType = "boolean"
-            paramTypes("com.facebook.graphql.model.GraphQLFeedUnitEdge")
-        }
+        matcher { returnType = "boolean"; paramTypes("com.facebook.graphql.model.GraphQLFeedUnitEdge") }
     }.single()
 }
 
@@ -233,18 +191,23 @@ val sponsoredStoryNextMethodFingerprint = findMethodDirect {
     }.first()
 }
 
-// ─── Story ad data sources ────────────────────────────────────────────────────
-
-val storyAdsDataSourceClassFingerprint = findClassDirect {
-    findMethod {
-        matcher { usingStrings("AdPaginatingBucketStaticInsertionDataSource.fetchMoreAds") }
-    }.first().declaredClass!!
-}
+// ─── Story ads in-disc source ─────────────────────────────────────────────────
+// Upstream changed search string to "ads_deletion" (from commit fixing profile timeline ads)
 
 val storyAdsInDiscClassFingerprint = findClassDirect {
     findMethod {
-        matcher { usingStrings("FbStoryAdInDiscStoreImpl") }
-    }.first().declaredClass!!
+        matcher { usingStrings("ads_deletion") }
+    }.first { md ->
+        val cls = md.declaredClass ?: return@first false
+        cls.findMethod {
+            matcher {
+                returnType = "com.google.common.collect.ImmutableList"
+                paramTypes("com.facebook.auth.usersession.FbUserSession", null, "com.google.common.collect.ImmutableList")
+            }
+        }.isNotEmpty() && cls.findMethod {
+            matcher { returnType = "void"; paramTypes(null, "com.google.common.collect.ImmutableList") }
+        }.isNotEmpty()
+    }.declaredClass!!
 }
 
 // ─── Game ad request methods ──────────────────────────────────────────────────
@@ -258,11 +221,7 @@ val gameAdRequestMethodsFingerprint = findMethodListDirect {
         "Invalid JSON content received by onShowAdAsync: "
     ).flatMap { tag ->
         findMethod {
-            matcher {
-                returnType = "void"
-                paramTypes("org.json.JSONObject")
-                usingStrings(tag)
-            }
+            matcher { returnType = "void"; paramTypes("org.json.JSONObject"); usingStrings(tag) }
         }
     }.distinctBy { it.descriptor }.filter { !it.isConstructor }
 }
