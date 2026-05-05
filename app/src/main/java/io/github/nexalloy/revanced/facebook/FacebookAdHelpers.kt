@@ -793,6 +793,8 @@ fun hookAudienceNetworkRewardFallbacks(classLoader: ClassLoader) {
     listOf(
         "com.facebook.ads.RewardedVideoAd",
         "com.facebook.ads.RewardedInterstitialAd",
+        "com.facebook.ads.RewardedVideoAdListener",
+        "com.facebook.ads.RewardedInterstitialAdListener",
         "com.facebook.ads.RewardedVideoAd\$RewardedVideoAdLoadConfigBuilder",
         "com.facebook.ads.RewardedInterstitialAd\$RewardedInterstitialAdLoadConfigBuilder"
     ).forEach { cn -> runCatching { tryHookAudienceNetworkRewardClass(classLoader.loadClass(cn)) } }
@@ -817,27 +819,44 @@ private fun tryHookAudienceNetworkRewardClass(clazz: Class<*>) {
     if (!isAudienceNetworkRewardRelevantClass(className) || !audienceNetworkRewardClassesHooked.add(className)) return
     var hooked = 0
     val methods = runCatching { clazz.declaredMethods + clazz.methods }.getOrDefault(emptyArray())
-    methods.distinctBy { m -> m.name + m.parameterTypes.joinToString { it.name } }.forEach { m ->
-        runCatching {
-            m.isAccessible = true
-            if (isAudienceNetworkRewardShowMethod(clazz, m)) {
-                XposedBridge.hookMethod(m, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val adObject = param.thisObject ?: return
-                        completeAudienceNetworkRewardObject(adObject, "show hook ${clazz.name}.${m.name}")
-                        param.result = when (m.returnType) { Boolean::class.javaPrimitiveType, Boolean::class.java -> true; else -> null }
-                    }
-                }); hooked++
-            } else if (isAudienceNetworkRewardListenerRegistrationMethod(m)) {
-                XposedBridge.hookMethod(m, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) { rememberAudienceNetworkRewardListeners(param.thisObject, param.args, m) }
-                    override fun afterHookedMethod(param: MethodHookParam) { rememberAudienceNetworkRewardListeners(param.thisObject, param.args, m); rememberAudienceNetworkRewardListeners(param.result, param.args, m) }
-                }); hooked++
-            }
+    methods.distinctBy { m -> m.name + m.parameterTypes.joinToString(prefix = "(", postfix = ")") { it.name } }
+        .forEach { m ->
+            runCatching {
+                m.isAccessible = true
+                if (isAudienceNetworkRewardShowMethod(clazz, m)) {
+                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            val adObject = param.thisObject ?: return
+                            if (!completeAudienceNetworkRewardObject(adObject, "show ${clazz.name}.${m.name}")) return
+                            param.result = when (m.returnType) {
+                                Boolean::class.javaPrimitiveType, Boolean::class.java -> true
+                                else -> null
+                            }
+                        }
+                    }); hooked++
+                } else if (isAudienceNetworkRewardListenerRegistrationMethod(m)) {
+                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) { rememberAudienceNetworkRewardListeners(param.thisObject, param.args, m) }
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            rememberAudienceNetworkRewardListeners(param.thisObject, param.args, m)
+                            rememberAudienceNetworkRewardListeners(param.result, param.args, m)
+                        }
+                    }); hooked++
+                } else if (isAudienceNetworkRewardLoadMethod(clazz, m)) {
+                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) { rememberAudienceNetworkRewardListeners(param.thisObject, param.args, m) }
+                    }); hooked++
+                }
+            }.onFailure { XposedBridge.log("[$FB_TAG] Failed to hook AN reward method ${clazz.name}.${m.name}: ${it.message}") }
         }
-    }
     if (hooked > 0) XposedBridge.log("[$FB_TAG] Hooked $hooked Audience Network reward method(s) in $className")
 }
+
+private fun isAudienceNetworkRewardLoadMethod(clazz: Class<*>, method: Method) =
+    clazz.name.lowercase().contains("reward") &&
+    method.name.lowercase().contains("load") &&
+    !Modifier.isStatic(method.modifiers) &&
+    method.parameterCount >= 1
 
 // ─── Game ad payload helpers ──────────────────────────────────────────────────
 
@@ -874,10 +893,15 @@ private fun shouldMakeGameAdUnavailable(payload: Any?, messageType: String?): Bo
     if (messageType in GAME_AD_UNAVAILABLE_MESSAGE_TYPES) return true
     if (messageType !in setOf("loadadasync", "showadasync")) return false
     val content = extractGameAdContent(payload)
-    val knownType = content?.optString("adInstanceID")?.takeIf { it.isNotBlank() }?.let { gameAdInstanceTypes[it] }
+    val adInstanceId = content?.optString("adInstanceID")?.takeIf { it.isNotBlank() }
+    val knownType = adInstanceId?.let { gameAdInstanceTypes[it] }
     if (knownType in GAME_AD_UNAVAILABLE_MESSAGE_TYPES) return true
-    val placementText = listOf(content?.optString("placementID"), content?.optString("adType"), content?.optString("type"), content?.optString("format"))
-        .joinToString(" ") { it.orEmpty() }.lowercase()
+    val placementText = listOf(
+        content?.optString("placementID").orEmpty(),
+        content?.optString("adType").orEmpty(),
+        content?.optString("type").orEmpty(),
+        content?.optString("format").orEmpty()
+    ).joinToString(" ").lowercase()
     if (placementText.contains("reward")) return true
     return payload?.toString()?.lowercase()?.contains("rewarded") == true
 }
@@ -948,29 +972,30 @@ private fun dispatchPostResolveGameAdSignals(target: Any?, payload: Any?, messag
 }
 
 fun buildGameAdSuccessPayload(payload: Any?, messageType: String? = null): JSONObject {
-    val effectiveType = messageType ?: (payload as? JSONObject)?.optString("type").orEmpty()
-    val content       = extractGameAdContent(payload)
-    val placementId   = content?.optString("placementID")?.takeIf { it.isNotBlank() }
+    val effectiveMessageType = messageType ?: (payload as? JSONObject)?.optString("type").orEmpty()
+    val content = extractGameAdContent(payload)
+    val result = JSONObject()
+    val placementId    = content?.optString("placementID")?.takeIf { it.isNotBlank() }
     val requestedInstId = content?.optString("adInstanceID")?.takeIf { it.isNotBlank() }
     val bannerPosition = content?.optString("bannerPosition")?.takeIf { it.isNotBlank() }
-    val result = JSONObject()
-
     result.put("success", true)
-    if (effectiveType.contains("reward", ignoreCase = true)) {
+    if (effectiveMessageType?.contains("reward", ignoreCase = true) == true) {
         result.put("completed", true).put("didComplete", true).put("watched", true)
               .put("rewarded", true).put("completionGesture", "post")
     }
-    placementId?.let   { result.put("placementID", it) }
-    bannerPosition?.let { result.put("bannerPosition", it) }
-
+    if (placementId != null)    result.put("placementID", placementId)
+    if (bannerPosition != null) result.put("bannerPosition", bannerPosition)
     val adInstanceId = when {
         requestedInstId != null -> { gameAdInstanceIds.putIfAbsent(requestedInstId, requestedInstId); requestedInstId }
-        placementId != null && effectiveType != "loadbanneradasync" -> resolveGameAdInstanceId(placementId, effectiveType, bannerPosition)
+        placementId != null && effectiveMessageType != "loadbanneradasync" ->
+            resolveGameAdInstanceId(placementId, effectiveMessageType, bannerPosition)
         else -> null
     }
-    adInstanceId?.let { id ->
-        result.put("adInstanceID", id)
-        effectiveType.takeIf { it.isNotBlank() }?.let { gameAdInstanceTypes.putIfAbsent(id, it) }
+    if (adInstanceId != null) {
+        result.put("adInstanceID", adInstanceId)
+        effectiveMessageType.takeIf { it.isNotBlank() }?.let { type ->
+            gameAdInstanceTypes.putIfAbsent(adInstanceId, type)
+        }
     }
     return result
 }
@@ -1187,7 +1212,13 @@ private fun isAudienceNetworkRewardRelevantClass(className: String): Boolean {
 }
 
 private fun isAudienceNetworkRewardShowMethod(clazz: Class<*>, method: Method) =
-    clazz.name.lowercase().contains("reward") && method.name == "show" && !Modifier.isStatic(method.modifiers) && method.parameterCount <= 1
+    clazz.name.lowercase().contains("reward") &&
+    method.name == "show" &&
+    !Modifier.isStatic(method.modifiers) &&
+    method.parameterCount <= 1 &&
+    (method.returnType == Void.TYPE ||
+     method.returnType == Boolean::class.javaPrimitiveType ||
+     method.returnType == Boolean::class.java)
 
 private fun isAudienceNetworkRewardListenerRegistrationMethod(method: Method): Boolean {
     if (Modifier.isStatic(method.modifiers) || method.parameterCount == 0) return false
