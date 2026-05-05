@@ -698,6 +698,8 @@ fun hookGlobalGameAdActivityLifecycleFallback() {
     XposedBridge.hookMethod(onResume, object : XC_MethodHook() {
         override fun afterHookedMethod(param: MethodHookParam) {
             val activity = param.thisObject as? Activity ?: return
+            // Always schedule a surface sweep on resume (catches async ad loads)
+            scheduleGameAdSurfaceSweep(activity.window?.decorView, "activity resume ${activity.javaClass.name}")
             if (activity.javaClass.name !in GAME_AD_ACTIVITY_CLASS_NAMES) return
             handleGameAdActivity(activity, "global lifecycle fallback")
         }
@@ -744,8 +746,12 @@ fun hookGlobalGameAdSurfaceFallbacks() {
             XposedBridge.hookMethod(m, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val child = param.args.firstOrNull { it is View } as? View ?: return
-                    if (isPotentialNativeGameAdView(child)) { hideLikelyGameAdContainer(child) }
-                    else if (child is WebView) { injectGameAdHidingScript(child) }
+                    if (isPotentialNativeGameAdView(child)) {
+                        hideLikelyGameAdContainer(child)
+                        scheduleGameAdSurfaceSweep(child, "native ad view add ${child.javaClass.name}")
+                    } else if (child is WebView) {
+                        injectGameAdHidingScript(child)
+                    }
                 }
             }); hooked++
         }
@@ -770,7 +776,9 @@ fun hookGlobalGameAdSurfaceFallbacks() {
             m.isAccessible = true
             XposedBridge.hookMethod(m, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    val wv = param.thisObject as? WebView ?: return; injectGameAdHidingScript(wv)
+                    val wv = param.thisObject as? WebView ?: return
+                    injectGameAdHidingScript(wv)
+                    scheduleGameAdSurfaceSweep(wv, "webview ${m.name}")
                 }
             }); hooked++
         }
@@ -879,7 +887,12 @@ fun shouldAutofixGameAdMessage(messageType: String?) = messageType in GAME_AD_AU
 private fun shouldBlockGameAdActivityLaunch(className: String): Boolean {
     return className in HARD_BLOCKED_GAME_AD_ACTIVITY_CLASS_NAMES ||
         (className in setOf(AUDIENCE_NETWORK_ACTIVITY_CLASS, AUDIENCE_NETWORK_REMOTE_ACTIVITY_CLASS) &&
-         lastUnavailableGameAdMs.get() > 0 && System.currentTimeMillis() - lastUnavailableGameAdMs.get() < GAME_AD_RECENT_WINDOW_MS)
+         isRecentUnavailableGameAd())
+}
+
+private fun isRecentUnavailableGameAd(): Boolean {
+    val rejectedAt = lastUnavailableGameAdMs.get()
+    return rejectedAt > 0 && System.currentTimeMillis() - rejectedAt < GAME_AD_RECENT_WINDOW_MS
 }
 
 private fun shouldConvertGameAdRejectToSuccess(promiseId: String, reason: String): Boolean {
@@ -1108,9 +1121,28 @@ private fun rememberAudienceNetworkRewardListeners(owner: Any?, args: Array<Any?
 
 private fun isAudienceNetworkRewardListenerObject(value: Any?): Boolean {
     if (value == null) return false
-    val cn = value.javaClass.name.lowercase()
+    val type = value.javaClass
+    val cn = type.name.lowercase()
     if (cn.contains("listener") && (cn.contains("reward") || cn.contains("ad"))) return true
-    return audienceNetworkMethodsFor(value.javaClass).any { m -> m.name in AUDIENCE_NETWORK_REWARD_COMPLETION_METHOD_NAMES || m.name.contains("Reward", ignoreCase = true) }
+    if (audienceNetworkInterfacesFor(type).any { iface ->
+            val ifn = iface.name.lowercase()
+            ifn.contains("listener") && (ifn.contains("reward") || ifn.contains("ad"))
+        }) return true
+    return audienceNetworkMethodsFor(type).any { m ->
+        m.name in AUDIENCE_NETWORK_REWARD_COMPLETION_METHOD_NAMES ||
+        m.name.contains("Reward", ignoreCase = true)
+    }
+}
+
+private fun audienceNetworkInterfacesFor(type: Class<*>): List<Class<*>> {
+    val interfaces = LinkedHashSet<Class<*>>()
+    fun collect(current: Class<*>?) {
+        if (current == null || current == Any::class.java) return
+        current.interfaces.forEach { iface -> if (interfaces.add(iface)) collect(iface) }
+        collect(current.superclass)
+    }
+    collect(type)
+    return interfaces.toList()
 }
 
 private fun isAudienceNetworkRewardRelevantClass(className: String): Boolean {
@@ -1165,17 +1197,53 @@ private val GAME_AD_WEBVIEW_HIDE_SCRIPT = """
 })();
 """.trimIndent()
 
+private fun scheduleGameAdSurfaceSweep(view: View?, reason: String) {
+    val root = view?.rootView ?: view ?: return
+    longArrayOf(0L, 250L, 1_000L, 2_500L, 5_000L).forEach { delayMs ->
+        root.postDelayed({ sweepGameAdSurface(root, reason) }, delayMs)
+    }
+}
+
+private fun sweepGameAdSurface(view: View?, reason: String): Boolean {
+    if (view == null) return false
+    var hidden = false
+    if (view is WebView) injectGameAdHidingScript(view)
+    if (isPotentialNativeGameAdView(view) || (view is TextView && isGameAdMarkerText(view.text))) {
+        hidden = runCatching { hideLikelyGameAdContainer(view); true }.getOrDefault(false)
+    }
+    val group = view as? ViewGroup ?: return hidden
+    for (i in 0 until group.childCount) {
+        hidden = sweepGameAdSurface(group.getChildAt(i), reason) || hidden
+    }
+    return hidden
+}
+
 private fun injectGameAdHidingScript(webView: WebView) {
     webView.post { runCatching { webView.evaluateJavascript(GAME_AD_WEBVIEW_HIDE_SCRIPT, null) } }
 }
 
 private fun hideLikelyGameAdContainer(view: View) {
     runCatching {
-        if (view.visibility != View.GONE) { view.visibility = View.GONE }
+        if (view.visibility != View.GONE) view.visibility = View.GONE
         view.minimumHeight = 0
-        view.layoutParams?.let { p -> p.height = 0; view.layoutParams = p }
+        view.layoutParams?.let { p ->
+            if (isLikelyBannerSized(view, view.rootView) || isPotentialNativeGameAdView(view)) {
+                p.height = 0; view.layoutParams = p
+            }
+        }
         view.requestLayout()
     }
+}
+
+private fun isLikelyBannerSized(view: View, root: View?): Boolean {
+    val rootHeight = root?.height?.takeIf { it > 0 } ?: return view.height in 1..360
+    val height = view.height
+    if (height <= 0 || height > maxOf(360, rootHeight / 3)) return false
+    val location = IntArray(2)
+    return runCatching {
+        view.getLocationOnScreen(location)
+        location[1] + height > rootHeight / 2
+    }.getOrDefault(true)
 }
 
 private fun isPotentialNativeGameAdView(view: View?): Boolean {
