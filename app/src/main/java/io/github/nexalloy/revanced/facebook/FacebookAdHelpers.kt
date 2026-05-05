@@ -747,7 +747,7 @@ fun hookGlobalGameAdSurfaceFallbacks() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val child = param.args.firstOrNull { it is View } as? View ?: return
                     if (isPotentialNativeGameAdView(child)) {
-                        hideLikelyGameAdContainer(child)
+                        hideLikelyGameAdContainer(child, "native ad view add ${child.javaClass.name}")
                         scheduleGameAdSurfaceSweep(child, "native ad view add ${child.javaClass.name}")
                     } else if (child is WebView) {
                         injectGameAdHidingScript(child)
@@ -764,7 +764,7 @@ fun hookGlobalGameAdSurfaceFallbacks() {
             XposedBridge.hookMethod(m, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val tv = param.thisObject as? TextView ?: return
-                    if (isGameAdMarkerText(tv.text)) hideLikelyGameAdContainer(tv)
+                    if (isGameAdMarkerText(tv.text)) hideLikelyGameAdContainer(tv, "ad marker text ${m.name}")
                 }
             }); hooked++
         }
@@ -824,7 +824,7 @@ private fun tryHookAudienceNetworkRewardClass(clazz: Class<*>) {
                 XposedBridge.hookMethod(m, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val adObject = param.thisObject ?: return
-                        completeAudienceNetworkRewardObject(adObject)
+                        completeAudienceNetworkRewardObject(adObject, "show hook ${clazz.name}.${m.name}")
                         param.result = when (m.returnType) { Boolean::class.javaPrimitiveType, Boolean::class.java -> true; else -> null }
                     }
                 }); hooked++
@@ -1021,12 +1021,15 @@ private fun handleGameAdActivity(activity: Activity, source: String) {
     }
 }
 
+private fun buildGameAdActivityResultIntent(): Intent =
+    Intent().apply { putExtra("success", true) }
+
 private fun finishGameAdActivity(activity: Activity, source: String) {
     if (activity.isFinishing) return
     lastGameAdActivityCloseMs.set(System.currentTimeMillis())
     completeRecentGameAdRequests(source)
     if (activity.javaClass.name in GAME_AD_ACTIVITY_CLASS_NAMES) {
-        activity.setResult(Activity.RESULT_OK, Intent().apply { putExtra("success", true) })
+        activity.setResult(Activity.RESULT_OK, buildGameAdActivityResultIntent())
     } else {
         activity.setResult(Activity.RESULT_CANCELED, Intent())
     }
@@ -1043,13 +1046,13 @@ private fun forceAudienceNetworkRewardCompletion(activity: Activity, source: Str
         val (value, depth) = queue.removeFirst()
         if (seen.put(value, true) != null) continue; inspected++
         invoked += invokeAudienceNetworkRewardCompletionMethods(value)
-        if (depth >= 5) continue
+        if (depth >= 5 || !shouldTraverseAudienceNetworkObject(value, value === activity)) continue
         audienceNetworkFieldsFor(value.javaClass).forEach { f ->
             val fv = runCatching { f.get(value) }.getOrNull() ?: return@forEach
             when (fv) {
-                is Iterable<*> -> fv.take(12).forEach { item -> if (item != null && shouldTraverseAudienceNetworkObject(item)) queue.add(item to depth + 1) }
-                is Array<*>    -> fv.take(12).forEach { item -> if (item != null && shouldTraverseAudienceNetworkObject(item)) queue.add(item to depth + 1) }
-                else -> if (shouldTraverseAudienceNetworkObject(fv)) queue.add(fv to depth + 1)
+                is Iterable<*> -> fv.take(12).forEach { item -> if (item != null && shouldQueueAudienceNetworkObject(item)) queue.add(item to depth + 1) }
+                is Array<*>    -> fv.take(12).forEach { item -> if (item != null && shouldQueueAudienceNetworkObject(item)) queue.add(item to depth + 1) }
+                else -> if (shouldQueueAudienceNetworkObject(fv)) queue.add(fv to depth + 1)
             }
         }
     }
@@ -1065,25 +1068,57 @@ private fun invokeAudienceNetworkRewardCompletionMethods(target: Any): Int {
     return invoked
 }
 
-private fun completeAudienceNetworkRewardObject(adObject: Any) {
+private fun completeAudienceNetworkRewardObject(adObject: Any, source: String = "unknown"): Boolean {
     val listeners = LinkedHashSet<Any>()
     synchronized(audienceNetworkRewardAdListeners) { audienceNetworkRewardAdListeners[adObject]?.let { listeners.add(it) } }
     listeners.addAll(findAudienceNetworkRewardListeners(adObject))
-    listeners.forEach { listener -> invokeAudienceNetworkRewardListenerCallbacks(listener, adObject) }
+    var invoked = 0
+    listeners.forEach { listener -> invoked += invokeAudienceNetworkRewardListenerCallbacks(listener, adObject, source) }
+    if (invoked > 0) { XposedBridge.log("[$FB_TAG] Completed AN reward callbacks invoked=$invoked listeners=${listeners.size} via $source"); completeRecentGameAdRequests(source); return true }
+    XposedBridge.log("[$FB_TAG] No AN reward listener completed for ${adObject.javaClass.name} via $source")
+    return false
 }
 
-private fun invokeAudienceNetworkRewardListenerCallbacks(listener: Any, adObject: Any) {
-    val groups = listOf(
-        setOf("onAdLoaded","onLoggingImpression","onInterstitialDisplayed"),
-        setOf("onRewardedVideoCompleted","onRewardedAdCompleted","onRewardedInterstitialCompleted","onAdComplete","onAdCompleted"),
-        setOf("onRewardedVideoClosed","onRewardedInterstitialClosed","onAdClosed","onInterstitialDismissed")
+private fun invokeAudienceNetworkRewardListenerCallbacks(listener: Any, adObject: Any, source: String): Int {
+    var invoked = 0
+    val methodGroups = listOf(
+        setOf("onAdLoaded", "onLoggingImpression", "onInterstitialDisplayed"),
+        setOf("onRewardedVideoCompleted", "onRewardedAdCompleted", "onRewardedInterstitialCompleted", "onAdComplete", "onAdCompleted"),
+        setOf("onRewardedVideoClosed", "onRewardedInterstitialClosed", "onAdClosed", "onInterstitialDismissed")
     )
-    groups.forEach { group ->
-        audienceNetworkMethodsFor(listener.javaClass).filter { m -> m.name in group }.forEach { m ->
-            val args = when (m.parameterCount) { 0 -> emptyArray(); 1 -> if (m.parameterTypes[0].isAssignableFrom(adObject.javaClass)) arrayOf(adObject) else null; else -> null } ?: return@forEach
-            runCatching { m.invoke(listener, *args) }
-        }
+    methodGroups.forEach { group ->
+        audienceNetworkRewardMethodsFor(listener.javaClass)
+            .filter { m -> m.name in group }
+            .forEach { m ->
+                val args = audienceNetworkCallbackArgs(m, adObject) ?: return@forEach
+                runCatching { m.invoke(listener, *args); invoked++ }
+                    .onFailure { XposedBridge.log("[$FB_TAG] Failed AN callback ${listener.javaClass.name}.${m.name} via $source") }
+            }
     }
+    return invoked
+}
+
+private fun audienceNetworkCallbackArgs(method: Method, adObject: Any): Array<Any?>? =
+    when (method.parameterCount) {
+        0 -> emptyArray()
+        1 -> { val pt = method.parameterTypes[0]; if (pt.isAssignableFrom(adObject.javaClass)) arrayOf(adObject) else null }
+        else -> null
+    }
+
+/** Like audienceNetworkMethodsFor but also includes interface-declared methods — needed for listener callbacks. */
+private fun audienceNetworkRewardMethodsFor(type: Class<*>): List<Method> {
+    val map = LinkedHashMap<String, Method>()
+    var cur: Class<*>? = type
+    while (cur != null && cur != Any::class.java && cur != Activity::class.java) {
+        (cur.declaredMethods + cur.methods).forEach { m ->
+            if (!Modifier.isStatic(m.modifiers)) {
+                m.isAccessible = true
+                map.putIfAbsent("${m.name}/${m.parameterTypes.joinToString { it.name }}", m)
+            }
+        }
+        cur = cur.superclass
+    }
+    return map.values.toList()
 }
 
 private fun findAudienceNetworkRewardListeners(root: Any?): List<Any> {
@@ -1095,13 +1130,13 @@ private fun findAudienceNetworkRewardListeners(root: Any?): List<Any> {
         val (value, depth) = queue.removeFirst()
         if (seen.put(value, true) != null) continue; inspected++
         if (value !== root && isAudienceNetworkRewardListenerObject(value)) { listeners.add(value); continue }
-        if (depth >= 5 || !shouldTraverseAudienceNetworkObject(value)) continue
+        if (depth >= 5 || !shouldQueueAudienceNetworkObject(value)) continue
         audienceNetworkFieldsFor(value.javaClass).forEach { f ->
             val fv = runCatching { f.get(value) }.getOrNull() ?: return@forEach
             when (fv) {
-                is Iterable<*> -> fv.take(12).forEach { item -> if (item != null && (isAudienceNetworkRewardListenerObject(item) || shouldTraverseAudienceNetworkObject(item))) queue.add(item to depth + 1) }
-                is Array<*>    -> fv.take(12).forEach { item -> if (item != null && (isAudienceNetworkRewardListenerObject(item) || shouldTraverseAudienceNetworkObject(item))) queue.add(item to depth + 1) }
-                else -> if (isAudienceNetworkRewardListenerObject(fv) || shouldTraverseAudienceNetworkObject(fv)) queue.add(fv to depth + 1)
+                is Iterable<*> -> fv.take(12).forEach { item -> if (item != null && (isAudienceNetworkRewardListenerObject(item) || shouldQueueAudienceNetworkObject(item))) queue.add(item to depth + 1) }
+                is Array<*>    -> fv.take(12).forEach { item -> if (item != null && (isAudienceNetworkRewardListenerObject(item) || shouldQueueAudienceNetworkObject(item))) queue.add(item to depth + 1) }
+                else -> if (isAudienceNetworkRewardListenerObject(fv) || shouldQueueAudienceNetworkObject(fv)) queue.add(fv to depth + 1)
             }
         }
     }
@@ -1160,7 +1195,14 @@ private fun isAudienceNetworkRewardListenerRegistrationMethod(method: Method): B
     return method.parameterTypes.any { t -> t.name.lowercase().contains("listener") && (t.name.lowercase().contains("reward") || t.name.lowercase().contains("ad")) }
 }
 
-private fun shouldTraverseAudienceNetworkObject(value: Any): Boolean {
+private fun shouldQueueAudienceNetworkObject(value: Any): Boolean {
+    val type = value.javaClass
+    if (type.isPrimitive || value is String || value is Number || value is Boolean || value is CharSequence) return false
+    return shouldTraverseAudienceNetworkObject(value, false)
+}
+
+private fun shouldTraverseAudienceNetworkObject(value: Any, isRootActivity: Boolean): Boolean {
+    if (isRootActivity) return true
     val cn = value.javaClass.name.lowercase()
     return cn.startsWith("com.facebook.ads.") || cn.startsWith("com.facebook.audiencenetwork.") ||
            cn.contains("audiencenetwork") || cn.contains("reward") || cn.contains("interstitial") ||
@@ -1209,7 +1251,7 @@ private fun sweepGameAdSurface(view: View?, reason: String): Boolean {
     var hidden = false
     if (view is WebView) injectGameAdHidingScript(view)
     if (isPotentialNativeGameAdView(view) || (view is TextView && isGameAdMarkerText(view.text))) {
-        hidden = runCatching { hideLikelyGameAdContainer(view); true }.getOrDefault(false)
+        hidden = hideLikelyGameAdContainer(view, reason) || hidden
     }
     val group = view as? ViewGroup ?: return hidden
     for (i in 0 until group.childCount) {
@@ -1222,17 +1264,20 @@ private fun injectGameAdHidingScript(webView: WebView) {
     webView.post { runCatching { webView.evaluateJavascript(GAME_AD_WEBVIEW_HIDE_SCRIPT, null) } }
 }
 
-private fun hideLikelyGameAdContainer(view: View) {
-    runCatching {
-        if (view.visibility != View.GONE) view.visibility = View.GONE
+private fun hideLikelyGameAdContainer(view: View, reason: String): Boolean {
+    var hidden = false
+    return runCatching {
+        if (view.visibility != View.GONE) { view.visibility = View.GONE; hidden = true }
         view.minimumHeight = 0
         view.layoutParams?.let { p ->
             if (isLikelyBannerSized(view, view.rootView) || isPotentialNativeGameAdView(view)) {
-                p.height = 0; view.layoutParams = p
+                p.height = 0; view.layoutParams = p; hidden = true
             }
         }
         view.requestLayout()
-    }
+        if (hidden) XposedBridge.log("[$FB_TAG] Hid game ad surface via $reason target=${view.javaClass.name}")
+        hidden
+    }.getOrDefault(hidden)
 }
 
 private fun isLikelyBannerSized(view: View, root: View?): Boolean {
