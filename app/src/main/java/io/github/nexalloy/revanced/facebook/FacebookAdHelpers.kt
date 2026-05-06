@@ -693,7 +693,7 @@ fun hookGameAdServiceDispatchMethods(bridgeClass: Class<*>) {
                 val messageType = param.args.getOrNull(1)?.toString()?.lowercase()?.takeIf { it in GAME_AD_MESSAGE_TYPES } ?: return
                 val payload = buildGameAdPayloadFromServiceBundle(bundle, messageType)
                 rememberGameAdPayload(param.thisObject, payload, messageType)
-                if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, messageType, "service dispatch ${method.name}")) { param.result = null; return }
+                if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, messageType, "service dispatch ${m.name}")) { param.result = null; return }
                 if (!shouldAutofixGameAdMessage(messageType)) return
                 if (resolveGameAdPayload(param.thisObject, payload, messageType)) {
                     dispatchPostResolveGameAdSignals(param.thisObject, payload, messageType); param.result = null
