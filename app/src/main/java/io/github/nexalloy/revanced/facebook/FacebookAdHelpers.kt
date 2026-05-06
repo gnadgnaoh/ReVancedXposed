@@ -550,21 +550,43 @@ fun hookSponsoredPoolResultMethods(poolClass: Class<*>) {
 
 // ─── Hook installers – Story ad providers ────────────────────────────────────
 
-fun hookStoryAdsNoOp(method: Method) {
-    XposedBridge.hookMethod(method, object : XC_MethodHook() { override fun beforeHookedMethod(param: MethodHookParam) { param.result = null } })
+fun hookStoryAdsNoOp(method: Method, reason: String = "story ad", source: String = method.declaringClass.name) {
+    XposedBridge.hookMethod(method, object : XC_MethodHook() {
+        override fun beforeHookedMethod(param: MethodHookParam) {
+            param.result = null
+            XposedBridge.log("[$FB_TAG] Blocked $reason in $source")
+        }
+    })
 }
 
-fun hookStoryAdsMerge(method: Method) {
+fun hookStoryAdsMerge(method: Method, source: String = method.declaringClass.name) {
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) { param.args.getOrNull(2)?.let { param.result = it } }
+        override fun beforeHookedMethod(param: MethodHookParam) {
+            val originalBuckets = param.args.getOrNull(2)
+            if (originalBuckets != null) {
+                param.result = originalBuckets
+                XposedBridge.log("[$FB_TAG] Blocked story ad bucket merge in $source")
+            }
+        }
     })
 }
 
 fun hookStoryAdProvider(provider: StoryAdProviderHooks) {
-    provider.mergeMethod?.let { hookStoryAdsMerge(it) }
-    provider.fetchMoreAdsMethod?.let { hookStoryAdsNoOp(it) }
-    provider.deferredUpdateMethod?.let { hookStoryAdsNoOp(it) }
-    provider.insertionTriggerMethod?.let { hookStoryAdsNoOp(it) }
+    val hooked = ArrayList<String>()
+    provider.mergeMethod?.let { method ->
+        hookStoryAdsMerge(method, provider.providerClass.name); hooked.add("merge")
+    }
+    provider.fetchMoreAdsMethod?.let { method ->
+        hookStoryAdsNoOp(method, "story ad fetchMoreAds", provider.providerClass.name); hooked.add("fetchMoreAds")
+    }
+    provider.deferredUpdateMethod?.let { method ->
+        hookStoryAdsNoOp(method, "story ad deferred update", provider.providerClass.name); hooked.add("deferredUpdate")
+    }
+    provider.insertionTriggerMethod?.let { method ->
+        hookStoryAdsNoOp(method, "story ad insertion trigger", provider.providerClass.name); hooked.add("insertionTrigger")
+    }
+    if (hooked.isNotEmpty())
+        XposedBridge.log("[$FB_TAG] Hooked story ad provider ${provider.providerClass.name}: ${hooked.joinToString()}")
 }
 
 // ─── Hook installers – Game ads ───────────────────────────────────────────────
@@ -575,7 +597,7 @@ fun hookGameAdRequest(method: Method) {
             val payload = param.args.getOrNull(0) ?: return
             val messageType = inferGameAdMessageType(method, payload)
             rememberGameAdPayload(param.thisObject, payload, messageType)
-            if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, messageType)) { param.result = null; return }
+            if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, messageType, "request ${method.declaringClass.name}.${method.name}")) { param.result = null; return }
             if (!shouldAutofixGameAdMessage(messageType)) return
             if (resolveGameAdPayload(param.thisObject, payload, messageType)) {
                 dispatchPostResolveGameAdSignals(param.thisObject, payload, messageType)
@@ -594,7 +616,7 @@ fun hookGameAdBridge(method: Method) {
             val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
             val type = payload.optString("type"); if (type !in GAME_AD_MESSAGE_TYPES) return
             rememberGameAdPayload(param.thisObject, payload, type)
-            if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, type)) { param.result = null; return }
+            if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, type, "bridge ${method.declaringClass.name}.${method.name}")) { param.result = null; return }
             if (!shouldAutofixGameAdMessage(type)) return
             if (resolveGameAdPayload(param.thisObject, payload, type)) {
                 dispatchPostResolveGameAdSignals(param.thisObject, payload, type)
@@ -671,7 +693,7 @@ fun hookGameAdServiceDispatchMethods(bridgeClass: Class<*>) {
                 val messageType = param.args.getOrNull(1)?.toString()?.lowercase()?.takeIf { it in GAME_AD_MESSAGE_TYPES } ?: return
                 val payload = buildGameAdPayloadFromServiceBundle(bundle, messageType)
                 rememberGameAdPayload(param.thisObject, payload, messageType)
-                if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, messageType)) { param.result = null; return }
+                if (rejectUnavailableGameAdPayloadIfNeeded(param.thisObject, payload, messageType, "service dispatch ${method.name}")) { param.result = null; return }
                 if (!shouldAutofixGameAdMessage(messageType)) return
                 if (resolveGameAdPayload(param.thisObject, payload, messageType)) {
                     dispatchPostResolveGameAdSignals(param.thisObject, payload, messageType); param.result = null
@@ -882,11 +904,15 @@ fun rejectGameAdPayload(
     return runCatching { rejectMethod.invoke(target, promiseId, message, code); true }.getOrElse { false }
 }
 
-private fun rejectUnavailableGameAdPayloadIfNeeded(target: Any?, payload: Any?, messageType: String?): Boolean {
+private fun rejectUnavailableGameAdPayloadIfNeeded(target: Any?, payload: Any?, messageType: String?, source: String = "unknown"): Boolean {
     if (!shouldMakeGameAdUnavailable(payload, messageType)) return false
-    val rejected = rejectGameAdPayload(target, payload, GAME_AD_UNAVAILABLE_MESSAGE, GAME_AD_UNAVAILABLE_CODE)
-    if (rejected) { lastUnavailableGameAdMs.set(System.currentTimeMillis()); XposedBridge.log("[$FB_TAG] Marked rewarded game ad unavailable type=$messageType") }
-    return rejected
+    if (!rejectGameAdPayload(target, payload, GAME_AD_UNAVAILABLE_MESSAGE, GAME_AD_UNAVAILABLE_CODE)) {
+        XposedBridge.log("[$FB_TAG] Unable to mark rewarded game ad unavailable via $source type=$messageType")
+        return false
+    }
+    lastUnavailableGameAdMs.set(System.currentTimeMillis())
+    XposedBridge.log("[$FB_TAG] Marked rewarded game ad unavailable type=$messageType via $source")
+    return true
 }
 
 private fun shouldMakeGameAdUnavailable(payload: Any?, messageType: String?): Boolean {
@@ -919,11 +945,17 @@ private fun isRecentUnavailableGameAd(): Boolean {
     return rejectedAt > 0 && System.currentTimeMillis() - rejectedAt < GAME_AD_RECENT_WINDOW_MS
 }
 
+private fun isRecentGameAdActivityClose(): Boolean {
+    val closedAt = lastGameAdActivityCloseMs.get()
+    return closedAt > 0 && System.currentTimeMillis() - closedAt < 15_000L
+}
+
 private fun shouldConvertGameAdRejectToSuccess(promiseId: String, reason: String): Boolean {
     val snapshot = gameAdPromiseSnapshots[promiseId]
     if (shouldAutofixGameAdMessage(snapshot?.messageType)) return true
-    val closed = lastGameAdActivityCloseMs.get()
-    return closed > 0 && System.currentTimeMillis() - closed < 15_000L && reason.lowercase().contains("banner")
+    val normalized = reason.lowercase()
+    if (!isRecentGameAdActivityClose()) return false
+    return normalized.contains("banner")
 }
 
 fun rememberGameAdPayload(target: Any?, payload: Any?, messageType: String?) {
@@ -1063,6 +1095,7 @@ private fun finishGameAdActivity(activity: Activity, source: String) {
 }
 
 private fun forceAudienceNetworkRewardCompletion(activity: Activity, source: String) {
+    if (activity.javaClass.name !in GAME_AD_ACTIVITY_CLASS_NAMES) return
     val seen = IdentityHashMap<Any, Boolean>()
     val queue = java.util.ArrayDeque<Pair<Any, Int>>()
     queue.add(activity to 0)
@@ -1072,12 +1105,18 @@ private fun forceAudienceNetworkRewardCompletion(activity: Activity, source: Str
         if (seen.put(value, true) != null) continue; inspected++
         invoked += invokeAudienceNetworkRewardCompletionMethods(value)
         if (depth >= 5 || !shouldTraverseAudienceNetworkObject(value, value === activity)) continue
-        audienceNetworkFieldsFor(value.javaClass).forEach { f ->
-            val fv = runCatching { f.get(value) }.getOrNull() ?: return@forEach
-            when (fv) {
-                is Iterable<*> -> fv.take(12).forEach { item -> if (item != null && shouldQueueAudienceNetworkObject(item)) queue.add(item to depth + 1) }
-                is Array<*>    -> fv.take(12).forEach { item -> if (item != null && shouldQueueAudienceNetworkObject(item)) queue.add(item to depth + 1) }
-                else -> if (shouldQueueAudienceNetworkObject(fv)) queue.add(fv to depth + 1)
+        audienceNetworkFieldsFor(value.javaClass).forEach { field ->
+            val fieldValue = runCatching { field.get(value) }.getOrNull() ?: return@forEach
+            when (fieldValue) {
+                is Iterable<*> -> fieldValue.take(12).forEach { item ->
+                    if (item != null && shouldQueueAudienceNetworkObject(item)) queue.add(item to depth + 1)
+                }
+                is Array<*> -> fieldValue.take(12).forEach { item ->
+                    if (item != null && shouldQueueAudienceNetworkObject(item)) queue.add(item to depth + 1)
+                }
+                else -> if (shouldQueueAudienceNetworkObject(fieldValue)) {
+                    queue.add(fieldValue to depth + 1)
+                }
             }
         }
     }
@@ -1188,9 +1227,10 @@ private fun isAudienceNetworkRewardListenerObject(value: Any?): Boolean {
             val ifn = iface.name.lowercase()
             ifn.contains("listener") && (ifn.contains("reward") || ifn.contains("ad"))
         }) return true
-    return audienceNetworkMethodsFor(type).any { m ->
+    return audienceNetworkRewardMethodsFor(type).any { m ->
         m.name in AUDIENCE_NETWORK_REWARD_COMPLETION_METHOD_NAMES ||
-        m.name.contains("Reward", ignoreCase = true)
+        m.name.contains("Reward", ignoreCase = true) ||
+        m.name.contains("InterstitialDismissed", ignoreCase = true)
     }
 }
 
@@ -1296,19 +1336,26 @@ private fun injectGameAdHidingScript(webView: WebView) {
 }
 
 private fun hideLikelyGameAdContainer(view: View, reason: String): Boolean {
+    val root = view.rootView
+    val candidates = arrayListOf(view)
     var hidden = false
-    return runCatching {
-        if (view.visibility != View.GONE) { view.visibility = View.GONE; hidden = true }
-        view.minimumHeight = 0
-        view.layoutParams?.let { p ->
-            if (isLikelyBannerSized(view, view.rootView) || isPotentialNativeGameAdView(view)) {
-                p.height = 0; view.layoutParams = p; hidden = true
+    candidates.forEach { candidate ->
+        if (candidate.visibility != View.GONE) {
+            candidate.visibility = View.GONE
+            hidden = true
+        }
+        candidate.minimumHeight = 0
+        candidate.layoutParams?.let { params ->
+            if (isLikelyBannerSized(candidate, root) || isPotentialNativeGameAdView(candidate)) {
+                params.height = 0
+                candidate.layoutParams = params
+                hidden = true
             }
         }
-        view.requestLayout()
-        if (hidden) XposedBridge.log("[$FB_TAG] Hid game ad surface via $reason target=${view.javaClass.name}")
-        hidden
-    }.getOrDefault(hidden)
+        candidate.requestLayout()
+    }
+    if (hidden) XposedBridge.log("[$FB_TAG] Hid game ad surface via $reason targets=${candidates.joinToString { it.javaClass.name }}")
+    return hidden
 }
 
 private fun isLikelyBannerSized(view: View, root: View?): Boolean {
