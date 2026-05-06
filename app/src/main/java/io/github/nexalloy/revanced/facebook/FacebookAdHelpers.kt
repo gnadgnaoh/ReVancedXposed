@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicLong
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const val FB_TAG = "NexAlloy/Facebook"
+
 private const val BEFORE_SIZE_EXTRA = "nexalloy_fb_ads_before_size"
 private const val GAME_AD_SUCCESS_INSTANCE_PREFIX = "nexalloy_fb_noop_ad"
 private const val HOOK_HIT_LOG_EVERY = 25
@@ -391,7 +392,6 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
 fun logHookHitThrottled(hookName: String, method: Method, detail: String? = null) {
     val hits = hookHitCounters.computeIfAbsent(hookName) { AtomicInteger(0) }.incrementAndGet()
     if (hits <= 3 || hits % HOOK_HIT_LOG_EVERY == 0)
-        XposedBridge.log("[$FB_TAG] Hit $hookName #$hits at ${method.declaringClass.name}.${method.name}${detail?.let { " $it" } ?: ""}")
 }
 
 // ─── Hook installers – Reels / list-builder ───────────────────────────────────
@@ -407,8 +407,7 @@ fun hookListBuilderAppend(method: Method, inspector: AdStoryInspector) {
             if (beforeSize < 0 || beforeSize > list.size) return
             var removed = 0
             for (i in list.lastIndex downTo beforeSize) { if (inspector.containsAdStory(list[i])) { list.removeAt(i); removed++ } }
-            if (removed > 0) XposedBridge.log("[$FB_TAG] Removed $removed ad item(s) from upstream list append")
-        }
+            if (removed > 0)        }
     })
 }
 
@@ -417,8 +416,7 @@ fun hookListResultFilter(method: Method, source: String, inspector: AdStoryInspe
         override fun afterHookedMethod(param: MethodHookParam) {
             val result = param.result as? MutableList<Any?> ?: return
             val removed = filterAdItems(result, inspector)
-            if (removed > 0) XposedBridge.log("[$FB_TAG] Removed $removed ad item(s) from $source")
-        }
+            if (removed > 0)        }
     })
 }
 
@@ -426,11 +424,9 @@ fun hookPluginPackFallback(method: Method, inspector: AdStoryInspector) {
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             if (isMarketplaceAdsPluginPack(param.thisObject)) {
-                XposedBridge.log("[$FB_TAG] Returning empty plugin pack for marketplace ads")
                 param.result = arrayListOf<Any?>(); return
             }
             if (inspector.containsAdStory(param.thisObject)) {
-                XposedBridge.log("[$FB_TAG] Returning empty plugin pack for ad-backed story")
                 param.result = arrayListOf<Any?>()
             }
         }
@@ -438,8 +434,7 @@ fun hookPluginPackFallback(method: Method, inspector: AdStoryInspector) {
             if (isMarketplaceAdsPluginPack(param.thisObject)) return
             val result = param.result as? MutableList<Any?> ?: return
             val removed = filterAdItems(result, inspector)
-            if (removed > 0) XposedBridge.log("[$FB_TAG] Removed $removed ad plugin item(s)")
-        }
+            if (removed > 0)        }
     })
 }
 
@@ -464,14 +459,12 @@ fun hookFeedCsrFilterInput(method: Method, inspector: FeedItemInspector) {
             for (item in originalList) { if (inspector.isSponsoredFeedItem(item)) removed++ else kept.add(item) }
             if (removed <= 0) return
             buildImmutableListLike(param.args.getOrNull(1), kept)?.let { param.args[1] = it }
-            XposedBridge.log("[$FB_TAG] Removed $removed sponsored item(s) before ${method.declaringClass.name}.${method.name}")
         }
         override fun afterHookedMethod(param: MethodHookParam) {
             val resultItems = extractFeedItemsFromResult(param.result) ?: return
             val kept = ArrayList<Any?>(); var removed = 0
             for (item in resultItems) { if (inspector.isSponsoredFeedItem(item)) removed++ else kept.add(item) }
             if (removed > 0 && replaceFeedItemsInResult(param, kept))
-                XposedBridge.log("[$FB_TAG] Removed $removed sponsored item(s) from result of ${method.declaringClass.name}.${method.name}")
         }
     })
 }
@@ -485,7 +478,6 @@ fun hookLateFeedListSanitizer(hook: FeedListSanitizerHook, inspector: FeedItemIn
             if (removed <= 0) return
             buildImmutableListLike(param.args.getOrNull(hook.listArgIndex), kept)?.let {
                 param.args[hook.listArgIndex] = it
-                XposedBridge.log("[$FB_TAG] Late-removed $removed sponsored item(s) before ${hook.method.declaringClass.name}.${hook.method.name}")
             }
         }
     })
@@ -547,7 +539,6 @@ fun hookSponsoredPoolListMethods(poolClass: Class<*>) {
         XposedBridge.hookMethod(m, object : XC_MethodHook() { override fun beforeHookedMethod(param: MethodHookParam) { param.result = arrayListOf<Any?>() } })
         hooked++
     }
-    XposedBridge.log("[$FB_TAG] Hooked $hooked pool list method(s) on ${poolClass.name}")
 }
 
 fun hookSponsoredPoolResultMethods(poolClass: Class<*>) {
@@ -560,7 +551,6 @@ fun hookSponsoredPoolResultMethods(poolClass: Class<*>) {
         XposedBridge.hookMethod(m, object : XC_MethodHook() { override fun beforeHookedMethod(param: MethodHookParam) { buildSponsoredEmptyResult(m.returnType)?.let { param.result = it } } })
         hooked++
     }
-    XposedBridge.log("[$FB_TAG] Hooked $hooked pool result method(s) on ${poolClass.name}")
 }
 
 // ─── Hook installers – Story ad providers ────────────────────────────────────
@@ -569,7 +559,6 @@ fun hookStoryAdsNoOp(method: Method, reason: String = "story ad", source: String
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             param.result = null
-            XposedBridge.log("[$FB_TAG] Blocked $reason in $source")
         }
     })
 }
@@ -580,7 +569,6 @@ fun hookStoryAdsMerge(method: Method, source: String = method.declaringClass.nam
             val originalBuckets = param.args.getOrNull(2)
             if (originalBuckets != null) {
                 param.result = originalBuckets
-                XposedBridge.log("[$FB_TAG] Blocked story ad bucket merge in $source")
             }
         }
     })
@@ -601,7 +589,6 @@ fun hookStoryAdProvider(provider: StoryAdProviderHooks) {
         hookStoryAdsNoOp(method, "story ad insertion trigger", provider.providerClass.name); hooked.add("insertionTrigger")
     }
     if (hooked.isNotEmpty())
-        XposedBridge.log("[$FB_TAG] Hooked story ad provider ${provider.providerClass.name}: ${hooked.joinToString()}")
 }
 
 // ─── Hook installers – Game ads ───────────────────────────────────────────────
@@ -690,7 +677,6 @@ fun hookGameAdResultMethods(bridgeClass: Class<*>) {
             }
         }); hooked++
     }
-    XposedBridge.log("[$FB_TAG] Hooked $hooked game ad result helper(s) on ${bridgeClass.name}")
 }
 
 /** Hook Bundle-based service dispatch methods on the bridge class. */
@@ -716,7 +702,6 @@ fun hookGameAdServiceDispatchMethods(bridgeClass: Class<*>) {
             }
         }); hooked++
     }
-    XposedBridge.log("[$FB_TAG] Hooked $hooked game ad service dispatch method(s) on ${bridgeClass.name}")
 }
 
 fun hookPlayableAdActivity(method: Method) {
@@ -741,7 +726,6 @@ fun hookGlobalGameAdActivityLifecycleFallback() {
             handleGameAdActivity(activity, "global lifecycle fallback")
         }
     })
-    XposedBridge.log("[$FB_TAG] Hooked global game ad activity lifecycle fallback")
 }
 
 fun hookGameAdActivityLaunchFallbacks() {
@@ -767,7 +751,6 @@ fun hookGameAdActivityLaunchFallbacks() {
             }); hooked++
         }
     }
-    XposedBridge.log("[$FB_TAG] Hooked $hooked game ad activity launch fallback(s)")
 }
 
 /** Hook ViewGroup.addView, TextView.setText, WebView methods to catch native ad views. */
@@ -820,7 +803,6 @@ fun hookGlobalGameAdSurfaceFallbacks() {
             }); hooked++
         }
 
-    XposedBridge.log("[$FB_TAG] Hooked $hooked global game ad surface fallback method(s)")
 }
 
 /** Hook Audience Network reward classes to fire completion callbacks. */
@@ -848,7 +830,6 @@ fun hookAudienceNetworkRewardFallbacks(classLoader: ClassLoader) {
                 }
             })
         }
-    XposedBridge.log("[$FB_TAG] Hooked Audience Network reward dynamic class fallback")
 }
 
 private fun tryHookAudienceNetworkRewardClass(clazz: Class<*>) {
@@ -884,10 +865,9 @@ private fun tryHookAudienceNetworkRewardClass(clazz: Class<*>) {
                         override fun beforeHookedMethod(param: MethodHookParam) { rememberAudienceNetworkRewardListeners(param.thisObject, param.args, m) }
                     }); hooked++
                 }
-            }.onFailure { XposedBridge.log("[$FB_TAG] Failed to hook AN reward method ${clazz.name}.${m.name}: ${it.message}") }
+            }.onFailure { }
         }
-    if (hooked > 0) XposedBridge.log("[$FB_TAG] Hooked $hooked Audience Network reward method(s) in $className")
-}
+    if (hooked > 0)}
 
 private fun isAudienceNetworkRewardLoadMethod(clazz: Class<*>, method: Method) =
     clazz.name.lowercase().contains("reward") &&
@@ -922,11 +902,9 @@ fun rejectGameAdPayload(
 private fun rejectUnavailableGameAdPayloadIfNeeded(target: Any?, payload: Any?, messageType: String?, source: String = "unknown"): Boolean {
     if (!shouldMakeGameAdUnavailable(payload, messageType)) return false
     if (!rejectGameAdPayload(target, payload, GAME_AD_UNAVAILABLE_MESSAGE, GAME_AD_UNAVAILABLE_CODE)) {
-        XposedBridge.log("[$FB_TAG] Unable to mark rewarded game ad unavailable via $source type=$messageType")
         return false
     }
     lastUnavailableGameAdMs.set(System.currentTimeMillis())
-    XposedBridge.log("[$FB_TAG] Marked rewarded game ad unavailable type=$messageType via $source")
     return true
 }
 
@@ -1008,14 +986,12 @@ fun completeRecentGameAdRequests(source: String) {
         recentGameAdTargets.entries.removeIf { now - it.value > GAME_AD_RECENT_WINDOW_MS }; recentGameAdTargets.keys.toList()
     }
     targets.forEach { t -> dispatchGameEvent(t, "hidebannerad", JSONObject().put("completed", true)) }
-    if (resolved > 0) XposedBridge.log("[$FB_TAG] Re-resolved $resolved recent game ad request(s) via $source")
-}
+    if (resolved > 0)}
 
 private fun dispatchPostResolveGameAdSignals(target: Any?, payload: Any?, messageType: String?) {
     if (messageType in setOf("loadbanneradasync", "hidebanneradasync")) {
         val content = buildGameAdSuccessPayload(payload, messageType)
-        if (dispatchGameEvent(target, "hidebannerad", content)) XposedBridge.log("[$FB_TAG] Dispatched hidebannerad for type=$messageType")
-    }
+        if (dispatchGameEvent(target, "hidebannerad", content))    }
 }
 
 fun buildGameAdSuccessPayload(payload: Any?, messageType: String? = null): JSONObject {
@@ -1106,7 +1082,6 @@ private fun finishGameAdActivity(activity: Activity, source: String) {
         activity.setResult(Activity.RESULT_CANCELED, Intent())
     }
     activity.finish()
-    XposedBridge.log("[$FB_TAG] Closed game ad activity ${activity.javaClass.name} via $source")
 }
 
 private fun forceAudienceNetworkRewardCompletion(activity: Activity, source: String) {
@@ -1135,7 +1110,6 @@ private fun forceAudienceNetworkRewardCompletion(activity: Activity, source: Str
             }
         }
     }
-    XposedBridge.log("[$FB_TAG] Forced AN reward callbacks invoked=$invoked inspected=$inspected via $source")
 }
 
 private fun invokeAudienceNetworkRewardCompletionMethods(target: Any): Int {
@@ -1153,8 +1127,7 @@ private fun completeAudienceNetworkRewardObject(adObject: Any, source: String = 
     listeners.addAll(findAudienceNetworkRewardListeners(adObject))
     var invoked = 0
     listeners.forEach { listener -> invoked += invokeAudienceNetworkRewardListenerCallbacks(listener, adObject, source) }
-    if (invoked > 0) { XposedBridge.log("[$FB_TAG] Completed AN reward callbacks invoked=$invoked listeners=${listeners.size} via $source"); completeRecentGameAdRequests(source); return true }
-    XposedBridge.log("[$FB_TAG] No AN reward listener completed for ${adObject.javaClass.name} via $source")
+    if (invoked > 0) {; completeRecentGameAdRequests(source); return true }
     return false
 }
 
@@ -1171,7 +1144,7 @@ private fun invokeAudienceNetworkRewardListenerCallbacks(listener: Any, adObject
             .forEach { m ->
                 val args = audienceNetworkCallbackArgs(m, adObject) ?: return@forEach
                 runCatching { m.invoke(listener, *args); invoked++ }
-                    .onFailure { XposedBridge.log("[$FB_TAG] Failed AN callback ${listener.javaClass.name}.${m.name} via $source") }
+                    .onFailure { }
             }
     }
     return invoked
@@ -1369,8 +1342,7 @@ private fun hideLikelyGameAdContainer(view: View, reason: String): Boolean {
         }
         candidate.requestLayout()
     }
-    if (hidden) XposedBridge.log("[$FB_TAG] Hid game ad surface via $reason targets=${candidates.joinToString { it.javaClass.name }}")
-    return hidden
+    if (hidden)    return hidden
 }
 
 private fun isLikelyBannerSized(view: View, root: View?): Boolean {
