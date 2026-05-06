@@ -495,9 +495,15 @@ fun hookStoryPoolAdd(method: Method, inspector: FeedItemInspector) {
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             val item = param.args.getOrNull(0)
-            if (!inspector.isDefinitelySponsoredFeedItem(item)) return
+            if (!inspector.isDefinitelySponsoredFeedItem(item)) {
+                // Broad check: log but allow (same as upstream)
+                if (inspector.isSponsoredFeedItem(item)) {
+                    logHookHitThrottled("storyPoolBroadAllowed", method, inspector.describe(item))
+                }
+                return
+            }
             param.result = false
-            logHookHitThrottled("storyPoolBlock", method, inspector.describe(item))
+            logHookHitThrottled("storyPoolStrictBlock", method, inspector.describe(item))
         }
     })
 }
@@ -1461,13 +1467,19 @@ private fun buildGameAdPayloadFromServiceBundle(bundle: Bundle, messageType: Str
 private fun bundleToJsonObject(bundle: Bundle): JSONObject {
     val json = JSONObject()
     runCatching { bundle.keySet().toList() }.getOrDefault(emptyList()).forEach { key ->
-        when (val v = runCatching { bundle.get(key) }.getOrNull()) {
-            null -> json.put(key, JSONObject.NULL)
-            is String -> json.put(key, v); is Boolean -> json.put(key, v); is Number -> json.put(key, v)
-            is JSONObject -> json.put(key, v); is Bundle -> json.put(key, bundleToJsonObject(v))
-            else -> json.put(key, v.toString())
+        val value = runCatching { bundle.get(key) }.getOrNull()
+        when (value) {
+            null            -> json.put(key, JSONObject.NULL)
+            is String       -> json.put(key, value)
+            is Boolean      -> json.put(key, value)
+            is Number       -> json.put(key, value)
+            is JSONObject   -> json.put(key, value)
+            is org.json.JSONArray -> json.put(key, value)
+            is Bundle       -> json.put(key, bundleToJsonObject(value))
+            else            -> json.put(key, value.toString())
         }
-    }; return json
+    }
+    return json
 }
 
 private fun resolveGameAdInstanceId(placementId: String, messageType: String?, bannerPosition: String?): String {
