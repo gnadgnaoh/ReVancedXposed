@@ -390,7 +390,6 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
 
 fun logHookHitThrottled(hookName: String, method: Method, detail: String? = null) {
     val hits = hookHitCounters.computeIfAbsent(hookName) { AtomicInteger(0) }.incrementAndGet()
-    if (hits <= 3 || hits % HOOK_HIT_LOG_EVERY == 0)
 }
 
 // ─── Hook installers – Reels / list-builder ───────────────────────────────────
@@ -463,7 +462,6 @@ fun hookFeedCsrFilterInput(method: Method, inspector: FeedItemInspector) {
             val resultItems = extractFeedItemsFromResult(param.result) ?: return
             val kept = ArrayList<Any?>(); var removed = 0
             for (item in resultItems) { if (inspector.isSponsoredFeedItem(item)) removed++ else kept.add(item) }
-            if (removed > 0 && replaceFeedItemsInResult(param, kept))
         }
     })
 }
@@ -587,7 +585,6 @@ fun hookStoryAdProvider(provider: StoryAdProviderHooks) {
     provider.insertionTriggerMethod?.let { method ->
         hookStoryAdsNoOp(method, "story ad insertion trigger", provider.providerClass.name); hooked.add("insertionTrigger")
     }
-    if (hooked.isNotEmpty())
 }
 
 // ─── Hook installers – Game ads ───────────────────────────────────────────────
@@ -990,7 +987,6 @@ fun completeRecentGameAdRequests(source: String) {
 private fun dispatchPostResolveGameAdSignals(target: Any?, payload: Any?, messageType: String?) {
     if (messageType in setOf("loadbanneradasync", "hidebanneradasync")) {
         val content = buildGameAdSuccessPayload(payload, messageType)
-        if (dispatchGameEvent(target, "hidebannerad", content)) 
     }
 }
 
