@@ -326,8 +326,17 @@ class FeedItemInspector(itemContractTypes: Collection<Class<*>>) {
     private fun resolveChildAccessor(target: Any, acceptsValue: (Any?) -> Boolean): Method? =
         allInstanceMethods(target.javaClass).asSequence()
             .filter { m -> m.parameterCount == 0 && !m.returnType.isPrimitive && m.returnType != Void.TYPE && m.returnType != String::class.java && !m.returnType.isEnum && m.declaringClass != Any::class.java }
-            .sortedByDescending { m -> when { m.returnType.name == GRAPHQL_FEED_UNIT_EDGE_CLASS -> 4; m.returnType.name.startsWith("com.facebook.graphql.model.") -> 3; m.returnType.name.startsWith("com.facebook.") -> 2; !m.returnType.name.startsWith("java.") && !m.returnType.name.startsWith("android.") && !m.returnType.name.startsWith("kotlin.") -> 1; else -> 0 } }
+            .sortedByDescending { m -> scoreChildAccessor(m.returnType) }
             .firstOrNull { m -> acceptsValue(invokeNoThrow(m.apply { isAccessible = true }, target)) }
+
+    private fun scoreChildAccessor(type: Class<*>): Int = when {
+        type.name == GRAPHQL_FEED_UNIT_EDGE_CLASS                             -> 4
+        type.name.startsWith("com.facebook.graphql.model.")                   -> 3
+        type.name.startsWith("com.facebook.")                                 -> 2
+        !type.name.startsWith("java.") && !type.name.startsWith("javax.") &&
+        !type.name.startsWith("android.") && !type.name.startsWith("kotlin.") -> 1
+        else                                                                   -> 0
+    }
 
     private fun containsKnownAdSignals(value: Any?): Boolean {
         if (value == null) return false
