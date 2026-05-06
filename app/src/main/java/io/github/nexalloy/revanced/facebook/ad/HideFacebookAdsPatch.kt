@@ -61,27 +61,27 @@ val HideFacebookAds = patch(
 
     runCatching {
         hookListResultFilter(::listBuilderFactoryFingerprint.method, "list factory", storyInspector)
-    }.onFailure { XposedBridge.log("[$FB_TAG] No list factory method (non-fatal): ${it.message}") }
+    }.onFailure {: ${it.message}") }
 
     // Both FbShortsViewerPluginPack and MarketplaceAdsPluginPack
     ::pluginPackMethodsFingerprint.dexMethodList.forEach { dm ->
         runCatching { hookPluginPackFallback(dm.toMethod(), storyInspector) }
-            .onFailure { XposedBridge.log("[$FB_TAG] Plugin pack hook failed: ${it.message}") }
+            .onFailure { }
     }
 
     // ── 2. Instream banner & indicator pill ───────────────────────────────────
 
     runCatching { hookInstreamBannerEligibility(::instreamBannerEligibilityFingerprint.method) }
-        .onFailure { XposedBridge.log("[$FB_TAG] No instream banner eligibility (non-fatal): ${it.message}") }
+        .onFailure {: ${it.message}") }
 
     runCatching { hookIndicatorPillAdEligibility(::indicatorPillAdEligibilityFingerprint.method) }
-        .onFailure { XposedBridge.log("[$FB_TAG] No indicator pill eligibility (non-fatal): ${it.message}") }
+        .onFailure {: ${it.message}") }
 
     // ── 3. Reels banner Litho render ──────────────────────────────────────────
 
     ::reelsBannerRenderMethodsFingerprint.dexMethodList.forEach { dm ->
         runCatching { hookReelsBannerRender(dm.toMethod()) }
-            .onFailure { XposedBridge.log("[$FB_TAG] Reels banner render hook failed: ${it.message}") }
+            .onFailure { }
     }
 
     // ── 4. Feed CSR cache filter ──────────────────────────────────────────────
@@ -93,7 +93,7 @@ val HideFacebookAds = patch(
 
     ::feedCsrFilterMethodsFingerprint.dexMethodList.forEach { dm ->
         runCatching { hookFeedCsrFilterInput(dm.toMethod(), feedItemInspector) }
-            .onFailure { XposedBridge.log("[$FB_TAG] Feed CSR filter hook failed: ${it.message}") }
+            .onFailure { }
     }
 
     // ── 5. Late feed list sanitisers ──────────────────────────────────────────
@@ -105,35 +105,35 @@ val HideFacebookAds = patch(
                 it.name == "com.google.common.collect.ImmutableList"
             }.coerceAtLeast(0)
             hookLateFeedListSanitizer(FeedListSanitizerHook(method, listArgIndex), feedItemInspector)
-        }.onFailure { XposedBridge.log("[$FB_TAG] Late feed list hook failed: ${it.message}") }
+        }.onFailure { }
     }
 
     // ── 6. Story pool add ─────────────────────────────────────────────────────
 
     storyPoolAddMethods.forEach { method ->
         runCatching { hookStoryPoolAdd(method, feedItemInspector) }
-            .onFailure { XposedBridge.log("[$FB_TAG] Story pool add hook failed: ${it.message}") }
+            .onFailure { }
     }
 
     // ── 7. Sponsored pool ─────────────────────────────────────────────────────
 
     runCatching { hookSponsoredPoolAdd(::sponsoredPoolAddMethodFingerprint.method) }
-        .onFailure { XposedBridge.log("[$FB_TAG] No sponsored pool add (non-fatal): ${it.message}") }
+        .onFailure {: ${it.message}") }
 
     runCatching { hookSponsoredStoryNext(::sponsoredStoryNextMethodFingerprint.method) }
-        .onFailure { XposedBridge.log("[$FB_TAG] No sponsored story next (non-fatal): ${it.message}") }
+        .onFailure {: ${it.message}") }
 
     runCatching {
         val poolClass = ::sponsoredPoolClassFingerprint.clazz
         hookSponsoredPoolListMethods(poolClass)
         hookSponsoredPoolResultMethods(poolClass)
-    }.onFailure { XposedBridge.log("[$FB_TAG] No sponsored pool class (non-fatal): ${it.message}") }
+    }.onFailure {: ${it.message}") }
 
     // ── 8. Story ad provider (in-disc) ────────────────────────────────────────
 
     runCatching {
         hookStoryAdProvider(resolveStoryAdProviderHooks(::storyAdsInDiscClassFingerprint.clazz, true))
-    }.onFailure { XposedBridge.log("[$FB_TAG] No story ads in-disc source (non-fatal): ${it.message}") }
+    }.onFailure {: ${it.message}") }
 
     // ── 9. Game ad requests + bridge ─────────────────────────────────────────
 
@@ -143,7 +143,7 @@ val HideFacebookAds = patch(
 
     gameAdMethods.forEach { m ->
         runCatching { hookGameAdRequest(m) }
-            .onFailure { XposedBridge.log("[$FB_TAG] Game ad request hook failed: ${it.message}") }
+            .onFailure { }
     }
 
     // postMessage bridge
@@ -153,22 +153,22 @@ val HideFacebookAds = patch(
                 .firstOrNull { m -> m.name == "postMessage" && m.parameterCount == 2 && m.parameterTypes.all { it == String::class.java } }
                 ?.apply { isAccessible = true }
                 ?.let { hookGameAdBridge(it) }
-        }.onFailure { XposedBridge.log("[$FB_TAG] Game ad bridge hook failed: ${it.message}") }
+        }.onFailure { }
     }
 
     // ── 10. Deeper bridge hooks (resolve / reject / service dispatch) ─────────
 
     gameAdMethods.firstOrNull()?.declaringClass?.let { bridgeClass ->
         runCatching { hookGameAdResultMethods(bridgeClass) }
-            .onFailure { XposedBridge.log("[$FB_TAG] Game ad result hooks failed: ${it.message}") }
+            .onFailure { }
         runCatching { hookGameAdServiceDispatchMethods(bridgeClass) }
-            .onFailure { XposedBridge.log("[$FB_TAG] Game ad service dispatch hooks failed: ${it.message}") }
+            .onFailure { }
     }
 
     // ── 11. Audience Network reward fallbacks ─────────────────────────────────
 
     runCatching { hookAudienceNetworkRewardFallbacks(classLoader) }
-        .onFailure { XposedBridge.log("[$FB_TAG] AN reward fallbacks failed: ${it.message}") }
+        .onFailure { }
 
     // ── 12. Activity lifecycle hooks ──────────────────────────────────────────
 
@@ -178,7 +178,7 @@ val HideFacebookAds = patch(
             .firstOrNull { m -> m.name == "onResume" && m.parameterCount == 0 }
             ?.apply { isAccessible = true }
             ?.let { hookPlayableAdActivity(it) }
-    }.onFailure { XposedBridge.log("[$FB_TAG] No playable ad activity (non-fatal): ${it.message}") }
+    }.onFailure {: ${it.message}") }
 
     // AudienceNetwork activities
     listOf(AUDIENCE_NETWORK_ACTIVITY_CLASS, AUDIENCE_NETWORK_REMOTE_ACTIVITY_CLASS).forEach { cn ->
@@ -192,15 +192,14 @@ val HideFacebookAds = patch(
     }
 
     runCatching { hookGlobalGameAdActivityLifecycleFallback() }
-        .onFailure { XposedBridge.log("[$FB_TAG] Global lifecycle fallback failed: ${it.message}") }
+        .onFailure { }
 
     runCatching { hookGameAdActivityLaunchFallbacks() }
-        .onFailure { XposedBridge.log("[$FB_TAG] Launch fallbacks failed: ${it.message}") }
+        .onFailure { }
 
     // ── 13. Native ad view / WebView surface fallbacks ────────────────────────
 
     runCatching { hookGlobalGameAdSurfaceFallbacks() }
-        .onFailure { XposedBridge.log("[$FB_TAG] Surface fallbacks failed: ${it.message}") }
+        .onFailure { }
 
-    XposedBridge.log("[$FB_TAG] All Facebook ad patches applied")
 }
