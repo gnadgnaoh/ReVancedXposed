@@ -26,7 +26,6 @@ import java.util.concurrent.atomic.AtomicLong
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const val FB_TAG = "NexAlloy/Facebook"
-
 private const val BEFORE_SIZE_EXTRA = "nexalloy_fb_ads_before_size"
 private const val GAME_AD_SUCCESS_INSTANCE_PREFIX = "nexalloy_fb_noop_ad"
 private const val HOOK_HIT_LOG_EVERY = 25
@@ -407,7 +406,7 @@ fun hookListBuilderAppend(method: Method, inspector: AdStoryInspector) {
             if (beforeSize < 0 || beforeSize > list.size) return
             var removed = 0
             for (i in list.lastIndex downTo beforeSize) { if (inspector.containsAdStory(list[i])) { list.removeAt(i); removed++ } }
-            if (removed > 0)        }
+        }
     })
 }
 
@@ -416,7 +415,7 @@ fun hookListResultFilter(method: Method, source: String, inspector: AdStoryInspe
         override fun afterHookedMethod(param: MethodHookParam) {
             val result = param.result as? MutableList<Any?> ?: return
             val removed = filterAdItems(result, inspector)
-            if (removed > 0)        }
+        }
     })
 }
 
@@ -434,7 +433,7 @@ fun hookPluginPackFallback(method: Method, inspector: AdStoryInspector) {
             if (isMarketplaceAdsPluginPack(param.thisObject)) return
             val result = param.result as? MutableList<Any?> ?: return
             val removed = filterAdItems(result, inspector)
-            if (removed > 0)        }
+        }
     })
 }
 
@@ -865,9 +864,9 @@ private fun tryHookAudienceNetworkRewardClass(clazz: Class<*>) {
                         override fun beforeHookedMethod(param: MethodHookParam) { rememberAudienceNetworkRewardListeners(param.thisObject, param.args, m) }
                     }); hooked++
                 }
-            }.onFailure { }
+            }
         }
-    if (hooked > 0)}
+}
 
 private fun isAudienceNetworkRewardLoadMethod(clazz: Class<*>, method: Method) =
     clazz.name.lowercase().contains("reward") &&
@@ -986,12 +985,13 @@ fun completeRecentGameAdRequests(source: String) {
         recentGameAdTargets.entries.removeIf { now - it.value > GAME_AD_RECENT_WINDOW_MS }; recentGameAdTargets.keys.toList()
     }
     targets.forEach { t -> dispatchGameEvent(t, "hidebannerad", JSONObject().put("completed", true)) }
-    if (resolved > 0)}
+}
 
 private fun dispatchPostResolveGameAdSignals(target: Any?, payload: Any?, messageType: String?) {
     if (messageType in setOf("loadbanneradasync", "hidebanneradasync")) {
         val content = buildGameAdSuccessPayload(payload, messageType)
-        if (dispatchGameEvent(target, "hidebannerad", content))    }
+        if (dispatchGameEvent(target, "hidebannerad", content)) 
+    }
 }
 
 fun buildGameAdSuccessPayload(payload: Any?, messageType: String? = null): JSONObject {
@@ -1127,7 +1127,7 @@ private fun completeAudienceNetworkRewardObject(adObject: Any, source: String = 
     listeners.addAll(findAudienceNetworkRewardListeners(adObject))
     var invoked = 0
     listeners.forEach { listener -> invoked += invokeAudienceNetworkRewardListenerCallbacks(listener, adObject, source) }
-    if (invoked > 0) {; completeRecentGameAdRequests(source); return true }
+    if (invoked > 0) {  completeRecentGameAdRequests(source); return true }
     return false
 }
 
@@ -1144,7 +1144,6 @@ private fun invokeAudienceNetworkRewardListenerCallbacks(listener: Any, adObject
             .forEach { m ->
                 val args = audienceNetworkCallbackArgs(m, adObject) ?: return@forEach
                 runCatching { m.invoke(listener, *args); invoked++ }
-                    .onFailure { }
             }
     }
     return invoked
@@ -1342,7 +1341,7 @@ private fun hideLikelyGameAdContainer(view: View, reason: String): Boolean {
         }
         candidate.requestLayout()
     }
-    if (hidden)    return hidden
+    return hidden
 }
 
 private fun isLikelyBannerSized(view: View, root: View?): Boolean {
