@@ -48,6 +48,7 @@ import io.github.nexalloy.revanced.facebook.resolveListBuilderAppendMethod
 import io.github.nexalloy.revanced.facebook.resolveListBuilderFactoryMethod
 import io.github.nexalloy.revanced.facebook.resolveInstreamBannerEligibilityMethod
 import io.github.nexalloy.revanced.facebook.resolveStoryAdProviderHooks
+import io.github.nexalloy.revanced.facebook.hookSearchResultsAdFilter
 
 /**
  * Master patch – ports all FacebookAppAdsRemover hooks into NexAlloy.
@@ -356,3 +357,18 @@ val HideFacebookAds = patch(
         })
     }
 }
+
+    // ── 15. Search results ───────────────────────────────────────────────────
+    //
+    // Không có hook render nào ở đây, cố ý. Renderer của SERP (class chứa
+    // TOP_POSITION_PINNED / AD_SUPPRESSED_ADCOUNT_CAP) vẽ cả kết quả organic, cả
+    // spinner tail-load, cả divider — null nó là trắng trang. Thay vào đó: chặn
+    // request, và lọc danh sách theo module role.
+
+    runCatching {
+        val roleEnum = ::searchModuleRoleEnumFingerprint.clazz
+        hookSearchResultsAdFilter(::searchResultsEdgeListFingerprint.method, roleEnum)
+    }
+
+    runCatching { ::searchAdRequestMethodsFingerprint.dexMethodList }.getOrNull().orEmpty()
+        .forEach { dm -> runCatching { hookAdRequestNoOp(dm.toMethod()) } }
