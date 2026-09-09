@@ -1972,3 +1972,80 @@ val blockAdRequestTargetsFingerprint = findMethodListDirect {
         runCatching { resolve() }.getOrDefault(emptyList())
     }.distinctBy { it.descriptor }
 }
+
+// ─── Search results ───────────────────────────────────────────────────────────
+//
+// Surface riêng: kết quả search đi qua query của chính nó, không qua feed response,
+// nên không filter nào trong [HideFacebookAds] nhìn thấy nó. Cả ba fingerprint dưới
+// đây đều được đối chiếu trực tiếp với dex FB đang chạy, không đoán theo tên.
+
+/**
+ * Enum module-role của kết quả search — 549 giá trị, 11 trong số đó là quảng cáo.
+ *
+ * Neo bằng bốn giá trị đi cùng nhau. Một giá trị đứng riêng không đủ hẹp
+ * ("SEARCH_ADS" còn xuất hiện ở logger và ở Marketplace); bốn giá trị cùng lúc thì
+ * chỉ còn đúng enum này.
+ */
+val searchModuleRoleEnumFingerprint = findClassDirect {
+    findClass {
+        matcher {
+            usingEqStrings(
+                "SEARCH_ADS",
+                "TOP_POSITION_SEARCH_ADS",
+                "DEPENDENT_SEARCH_ADS",
+                "MARKETPLACE_SEARCH_ADS",
+            )
+        }
+    }.firstOrNull() ?: error("Unable to resolve the search module role enum")
+}
+
+/**
+ * Chỗ danh sách kết quả search đi qua khi response được xử lý.
+ *
+ * Class được định danh bằng "SearchCombinedResultsEdge" — tên type GraphQL, sống sót
+ * ProGuard vì là string constant. Ba class dùng chuỗi này trên dex được audit; hai
+ * class kia bị loại bởi ràng buộc hình dạng: một là string-table
+ * (`A00(int) -> String`), một là `void(FbUserSession, ?, ?)`.
+ *
+ * Đây là điểm lọc, KHÔNG phải render. Hook tiêu thụ nó xét từng item và chỉ bỏ item
+ * tự nhận diện được bằng role, nên một list toàn kết quả organic không bao giờ bị đụng.
+ */
+val searchResultsEdgeListFingerprint = findMethodDirect {
+    findClass {
+        matcher { usingStrings("SearchCombinedResultsEdge") }
+    }.firstNotNullOfOrNull { cls ->
+        cls.findMethod {
+            matcher {
+                modifiers = Modifier.STATIC
+                returnType = "com.google.common.collect.ImmutableList"
+                paramTypes("com.google.common.collect.ImmutableList")
+            }
+        }.firstOrNull()
+    } ?: error("Unable to resolve the search results edge list method")
+}
+
+/**
+ * Request quảng cáo của surface search. Cả ba đều `void` và đều đã được kiểm tra
+ * từng literal một trên dex — không method nào mang literal organic:
+ *
+ *  - `SearchTopPositionAdsQuery` — carousel quảng cáo ở đầu trang kết quả. Method
+ *    mang `number_of_ads` và `excluded_ad_ids`, không gì khác.
+ *  - `SearchInstantIntentAdsGraphQL` — fetch quảng cáo theo intent, kèm `ad_id` và
+ *    `fetch_instant_intent_ads`.
+ *  - `SearchAIModeAdStoryQuery` — story đằng sau một quảng cáo AI mode đã được chọn.
+ *
+ * `SearchAIModeAdsQuery` CỐ Ý vắng mặt. Method mang nó là một lambda Kotlin dùng
+ * chung, cũng mang `LunaTopUpdatesSnapshotBeforeQuery` và `HeaderInlineMessageQuery`;
+ * chặn nó là chặn luôn tin nhắn inline ở header profile. Cùng lý do mà
+ * `FetchNewsFeedMethod.addCachedStoryAndAdParams` bị loại khỏi tầng request feed.
+ */
+val searchAdRequestMethodsFingerprint = findMethodListDirect {
+    methodsUsingAnyOf(
+        listOf(
+            "SearchTopPositionAdsQuery",
+            "SearchInstantIntentAdsGraphQL",
+            "SearchAIModeAdStoryQuery",
+        )
+    ).filter { it.returnTypeName == "void" && it.isConcreteHookTarget() }
+        .distinctBy { it.descriptor }
+}
