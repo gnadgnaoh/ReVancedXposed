@@ -2883,46 +2883,87 @@ private val SEARCH_NO_ROLE_ACCESSOR: Method =
     FeedItemInspector::class.java.getDeclaredMethod("absentAccessorSentinel")
 
 /**
- * Bỏ kết quả quảng cáo khỏi danh sách kết quả search, xét từng item một.
+ * Module role của một unit kết quả search, hoặc null nếu unit không có accessor role.
  *
- * Accessor role được phân giải theo HÌNH DẠNG — method 0 tham số trả về đúng lớp enum
- * đã resolve — chứ không theo tên obfuscated. Miss cũng được cache, vì không cache
- * miss nghĩa là quét lại toàn bộ hierarchy cho mọi item ở mọi lần cuộn, đúng lỗi mà
+ * Accessor được phân giải theo HÌNH DẠNG — method 0 tham số trả về đúng lớp enum đã
+ * resolve — chứ không theo tên obfuscated. Miss cũng được cache: không cache miss
+ * nghĩa là quét lại toàn bộ class hierarchy cho mọi item ở mọi lần cuộn, đúng lỗi mà
  * [FeedItemInspector.cachedMethod] đã phải sửa.
  *
- * Lọc CẢ tham số vào lẫn kết quả ra: chỉ một trong hai bên mang wrapper có accessor,
- * và bên còn lại thì đơn giản là không có item nào khớp nên không bỏ gì. Không cần
- * biết trước bên nào.
+ * Trả null cho MỌI thứ không phải unit kết quả, nên hai hook dưới đây có thể ném bất
+ * kỳ object nào vào đây mà không cần biết trước kiểu của nó.
+ */
+private fun searchRoleOf(item: Any?, roleEnumClass: Class<*>): String? {
+    if (item == null) return null
+    val type = item.javaClass
+    if (type.isPrimitive || item is CharSequence || item is Number || item is Boolean) return null
+    val cached = searchRoleAccessorCache[type]
+    val accessor = if (cached != null) {
+        if (cached === SEARCH_NO_ROLE_ACCESSOR) return null else cached
+    } else {
+        val found = generateSequence<Class<*>>(type) { it.superclass }
+            .takeWhile { it != Any::class.java }
+            .flatMap { cls ->
+                (cls.declaredMethods.asSequence() +
+                    cls.interfaces.asSequence().flatMap { it.declaredMethods.asSequence() })
+            }
+            .firstOrNull { m ->
+                !Modifier.isStatic(m.modifiers) && m.parameterCount == 0 &&
+                    m.returnType == roleEnumClass
+            }?.apply { isAccessible = true }
+        searchRoleAccessorCache.putIfAbsent(type, found ?: SEARCH_NO_ROLE_ACCESSOR)
+        found ?: return null
+    }
+    return runCatching { accessor.invoke(item)?.toString() }.getOrNull()
+}
+
+/**
+ * Bỏ qua bước bung một MODULE quảng cáo thành các kết quả con.
+ *
+ * Đây là điểm chặn chính của surface search, và nó KHÔNG phải hook render: method chỉ
+ * đổ unit con vào hai ImmutableList.Builder được truyền vào. Bỏ qua nó với một module
+ * quảng cáo nghĩa là module ấy không đóng góp gì — đúng trạng thái mà app vốn đã xử
+ * lý mỗi khi một module không trả về kết quả nào.
+ *
+ * Tham số mang module được suy ra từ kiểu THẬT lúc chạy: tham số đầu tiên có accessor
+ * role. Không pin theo vị trí, vì Facebook vẫn hay chèn thêm tham số vào đầu danh
+ * sách giữa hai bản build — chính là thứ đã làm hỏng ba shape pinned của Reels
+ * list-builder giữa FB573 và FB575.
+ *
+ * Module không có role, hoặc có role không nằm trong [SEARCH_AD_MODULE_ROLES], thì
+ * method chạy nguyên vẹn. Sót một quảng cáo là kết quả tệ nhất có thể xảy ra ở đây.
+ */
+fun hookSearchModuleAdExpansion(method: Method, roleEnumClass: Class<*>) {
+    if (!pluginHooksInstalled.add(methodHookKey(method))) return
+    XposedBridge.hookMethod(method, object : XC_MethodHook() {
+        override fun beforeHookedMethod(param: MethodHookParam) {
+            val isAdModule = param.args.any { arg ->
+                searchRoleOf(arg, roleEnumClass) in SEARCH_AD_MODULE_ROLES
+            }
+            if (isAdModule) param.result = null
+        }
+    })
+}
+
+/**
+ * Bỏ kết quả quảng cáo khỏi danh sách kết quả search, xét từng item một.
+ *
+ * Lớp thứ hai, đứng sau [hookSearchModuleAdExpansion]: nó bắt những unit quảng cáo
+ * đến qua một trong các đường dựng khác thay vì qua bước bung module.
+ *
+ * Lọc CẢ tham số vào lẫn kết quả ra: chỉ một trong hai bên mang wrapper có accessor
+ * role, và bên còn lại thì đơn giản là không có item nào khớp nên không bỏ gì. Không
+ * cần biết trước bên nào.
  */
 fun hookSearchResultsAdFilter(method: Method, roleEnumClass: Class<*>) {
     if (!pluginHooksInstalled.add(methodHookKey(method))) return
-
-    fun roleOf(item: Any?): String? {
-        if (item == null) return null
-        val type = item.javaClass
-        val cached = searchRoleAccessorCache[type]
-        val accessor = if (cached != null) {
-            if (cached === SEARCH_NO_ROLE_ACCESSOR) return null else cached
-        } else {
-            val found = generateSequence<Class<*>>(type) { it.superclass }
-                .takeWhile { it != Any::class.java }
-                .flatMap { (it.declaredMethods + it.interfaces.flatMap { i -> i.declaredMethods.toList() }).asSequence() }
-                .firstOrNull { m ->
-                    !Modifier.isStatic(m.modifiers) && m.parameterCount == 0 &&
-                        m.returnType == roleEnumClass
-                }?.apply { isAccessible = true }
-            searchRoleAccessorCache.putIfAbsent(type, found ?: SEARCH_NO_ROLE_ACCESSOR)
-            found ?: return null
-        }
-        return runCatching { accessor.invoke(item)?.toString() }.getOrNull()
-    }
 
     fun filter(source: Any?): Any? {
         val items = source as? Iterable<*> ?: return null
         val kept = ArrayList<Any?>()
         var removed = 0
         for (item in items) {
-            if (roleOf(item) in SEARCH_AD_MODULE_ROLES) removed++ else kept.add(item)
+            if (searchRoleOf(item, roleEnumClass) in SEARCH_AD_MODULE_ROLES) removed++ else kept.add(item)
         }
         if (removed == 0) return null
         return buildImmutableListLike(source, kept)
