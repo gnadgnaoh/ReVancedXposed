@@ -2851,3 +2851,89 @@ fun hookFeedCollectionAddEdge(method: Method, inspector: FeedItemInspector) {
         }
     })
 }
+
+// ─── Search results ───────────────────────────────────────────────────────────
+
+/**
+ * Module role của một kết quả search khi kết quả đó là quảng cáo.
+ *
+ * Đây là định danh dương tính, giống hệt [GRAPHQL_AD_FEED_UNIT_TYPE_NAMES]: role nằm
+ * trong set thì chắc chắn là quảng cáo, vắng mặt thì không chứng minh được gì. Vì vậy
+ * kết quả tệ nhất là sót một quảng cáo, không bao giờ là mất một kết quả thật.
+ *
+ * `PROMOTED_ENTITY_MEDIA` và `HCM_VIDEO_PROMOTION_CTA` cố ý vắng mặt: "Promotion" ở
+ * đây có thể là nội dung do chính người dùng đẩy, đúng lý do mà
+ * `GreetingCardPromotionFeedUnit` bị loại khỏi set feed unit.
+ */
+val SEARCH_AD_MODULE_ROLES = setOf(
+    "SEARCH_ADS",
+    "TOP_POSITION_SEARCH_ADS",
+    "TOP_POSITION_SHOPPABLE_ADS",
+    "DEPENDENT_SEARCH_ADS",
+    "LATE_DEPENDENT_SEARCH_ADS",
+    "MARKETPLACE_SEARCH_ADS",
+    "MARKETPLACE_BOOSTED_LISTING_SEARCH_ADS",
+    "SEARCH_ADS_DISCOVERY_HEADER",
+    "SEARCH_ADS_FLOATING_SEE_MORE",
+    "FACEBOOK_ADVERTISING",
+)
+
+private val searchRoleAccessorCache = ConcurrentHashMap<Class<*>, Method>()
+private val SEARCH_NO_ROLE_ACCESSOR: Method =
+    FeedItemInspector::class.java.getDeclaredMethod("absentAccessorSentinel")
+
+/**
+ * Bỏ kết quả quảng cáo khỏi danh sách kết quả search, xét từng item một.
+ *
+ * Accessor role được phân giải theo HÌNH DẠNG — method 0 tham số trả về đúng lớp enum
+ * đã resolve — chứ không theo tên obfuscated. Miss cũng được cache, vì không cache
+ * miss nghĩa là quét lại toàn bộ hierarchy cho mọi item ở mọi lần cuộn, đúng lỗi mà
+ * [FeedItemInspector.cachedMethod] đã phải sửa.
+ *
+ * Lọc CẢ tham số vào lẫn kết quả ra: chỉ một trong hai bên mang wrapper có accessor,
+ * và bên còn lại thì đơn giản là không có item nào khớp nên không bỏ gì. Không cần
+ * biết trước bên nào.
+ */
+fun hookSearchResultsAdFilter(method: Method, roleEnumClass: Class<*>) {
+    if (!pluginHooksInstalled.add(methodHookKey(method))) return
+
+    fun roleOf(item: Any?): String? {
+        if (item == null) return null
+        val type = item.javaClass
+        val cached = searchRoleAccessorCache[type]
+        val accessor = if (cached != null) {
+            if (cached === SEARCH_NO_ROLE_ACCESSOR) return null else cached
+        } else {
+            val found = generateSequence<Class<*>>(type) { it.superclass }
+                .takeWhile { it != Any::class.java }
+                .flatMap { (it.declaredMethods + it.interfaces.flatMap { i -> i.declaredMethods.toList() }).asSequence() }
+                .firstOrNull { m ->
+                    !Modifier.isStatic(m.modifiers) && m.parameterCount == 0 &&
+                        m.returnType == roleEnumClass
+                }?.apply { isAccessible = true }
+            searchRoleAccessorCache.putIfAbsent(type, found ?: SEARCH_NO_ROLE_ACCESSOR)
+            found ?: return null
+        }
+        return runCatching { accessor.invoke(item)?.toString() }.getOrNull()
+    }
+
+    fun filter(source: Any?): Any? {
+        val items = source as? Iterable<*> ?: return null
+        val kept = ArrayList<Any?>()
+        var removed = 0
+        for (item in items) {
+            if (roleOf(item) in SEARCH_AD_MODULE_ROLES) removed++ else kept.add(item)
+        }
+        if (removed == 0) return null
+        return buildImmutableListLike(source, kept)
+    }
+
+    XposedBridge.hookMethod(method, object : XC_MethodHook() {
+        override fun beforeHookedMethod(param: MethodHookParam) {
+            filter(param.args.getOrNull(0))?.let { param.args[0] = it }
+        }
+        override fun afterHookedMethod(param: MethodHookParam) {
+            filter(param.result)?.let { param.result = it }
+        }
+    })
+}
