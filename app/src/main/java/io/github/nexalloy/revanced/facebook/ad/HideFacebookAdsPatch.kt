@@ -356,7 +356,6 @@ val HideFacebookAds = patch(
             }
         })
     }
-}
 
     // ── 15. Search results ───────────────────────────────────────────────────
     //
@@ -372,3 +371,4 @@ val HideFacebookAds = patch(
 
     runCatching { ::searchAdRequestMethodsFingerprint.dexMethodList }.getOrNull().orEmpty()
         .forEach { dm -> runCatching { hookAdRequestNoOp(dm.toMethod()) } }
+}
