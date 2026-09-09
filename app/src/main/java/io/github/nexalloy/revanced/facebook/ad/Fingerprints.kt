@@ -2042,7 +2042,6 @@ val searchResultsEdgeListFingerprint = findMethodDirect {
 val searchAdRequestMethodsFingerprint = findMethodListDirect {
     methodsUsingAnyOf(
         listOf(
-            "SearchTopPositionAdsQuery",
             "SearchInstantIntentAdsGraphQL",
             "SearchAIModeAdStoryQuery",
         )
