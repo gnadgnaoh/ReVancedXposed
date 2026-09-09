@@ -48,6 +48,7 @@ import io.github.nexalloy.revanced.facebook.resolveListBuilderAppendMethod
 import io.github.nexalloy.revanced.facebook.resolveListBuilderFactoryMethod
 import io.github.nexalloy.revanced.facebook.resolveInstreamBannerEligibilityMethod
 import io.github.nexalloy.revanced.facebook.resolveStoryAdProviderHooks
+import io.github.nexalloy.revanced.facebook.hookSearchModuleAdExpansion
 import io.github.nexalloy.revanced.facebook.hookSearchResultsAdFilter
 
 /**
@@ -366,7 +367,16 @@ val HideFacebookAds = patch(
 
     runCatching {
         val roleEnum = ::searchModuleRoleEnumFingerprint.clazz
-        hookSearchResultsAdFilter(::searchResultsEdgeListFingerprint.method, roleEnum)
+
+        // Chốt chặn chính: module quảng cáo bị bỏ qua TRƯỚC khi nó bung thành kết quả.
+        runCatching {
+            hookSearchModuleAdExpansion(::searchModuleExpansionFingerprint.method, roleEnum)
+        }
+
+        // Lớp thứ hai: bắt unit quảng cáo đến qua một trong sáu đường dựng còn lại.
+        runCatching {
+            hookSearchResultsAdFilter(::searchResultsEdgeListFingerprint.method, roleEnum)
+        }
     }
 
     runCatching { ::searchAdRequestMethodsFingerprint.dexMethodList }.getOrNull().orEmpty()
