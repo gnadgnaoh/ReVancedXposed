@@ -2028,16 +2028,27 @@ val searchResultsEdgeListFingerprint = findMethodDirect {
  * Request quảng cáo của surface search. Cả ba đều `void` và đều đã được kiểm tra
  * từng literal một trên dex — không method nào mang literal organic:
  *
- *  - `SearchTopPositionAdsQuery` — carousel quảng cáo ở đầu trang kết quả. Method
- *    mang `number_of_ads` và `excluded_ad_ids`, không gì khác.
  *  - `SearchInstantIntentAdsGraphQL` — fetch quảng cáo theo intent, kèm `ad_id` và
- *    `fetch_instant_intent_ads`.
+ *    `fetch_instant_intent_ads`. Caller duy nhất là component sponsored story.
  *  - `SearchAIModeAdStoryQuery` — story đằng sau một quảng cáo AI mode đã được chọn.
+ *    Caller nằm ngoài mọi đường nạp của SERP.
  *
- * `SearchAIModeAdsQuery` CỐ Ý vắng mặt. Method mang nó là một lambda Kotlin dùng
- * chung, cũng mang `LunaTopUpdatesSnapshotBeforeQuery` và `HeaderInlineMessageQuery`;
- * chặn nó là chặn luôn tin nhắn inline ở header profile. Cùng lý do mà
- * `FetchNewsFeedMethod.addCachedStoryAndAdParams` bị loại khỏi tầng request feed.
+ * HAI query CỐ Ý vắng mặt, cả hai vì cùng một lý do: chuỗi quảng cáo nằm trong một
+ * method KHÔNG chỉ làm quảng cáo. Đây đúng cái bẫy mà
+ * `FetchNewsFeedMethod.addCachedStoryAndAdParams` đã bị loại khỏi tầng request feed.
+ *
+ *  - `SearchAIModeAdsQuery` — method mang nó là một lambda Kotlin dùng chung, cũng
+ *    mang `LunaTopUpdatesSnapshotBeforeQuery` và `HeaderInlineMessageQuery`. Chặn nó
+ *    là chặn luôn tin nhắn inline ở header profile.
+ *  - `SearchTopPositionAdsQuery` — query thì đúng là quảng cáo, nhưng method mang nó
+ *    còn gọi bốn lệnh set state lên loader của SERP (`fetchMode`, `queryType`) trước
+ *    khi bắn query, và fragment gọi nó từ MỌI đường nạp: INITIAL, LOADING,
+ *    LOADING_MORE. Bỏ qua thân method là bỏ luôn bốn lệnh đó, và trang kết quả kẹt
+ *    vĩnh viễn ở skeleton — đã dựng lại được trên máy thật.
+ *
+ *    Không mất coverage: carousel ấy mang module role TOP_POSITION_SEARCH_ADS, nên
+ *    [searchModuleExpansionFingerprint] vẫn loại nó. Chỉ khác là request vẫn được
+ *    gửi đi — tốn băng thông, không hiện lên màn hình.
  */
 val searchAdRequestMethodsFingerprint = findMethodListDirect {
     methodsUsingAnyOf(
@@ -2047,4 +2058,30 @@ val searchAdRequestMethodsFingerprint = findMethodListDirect {
         )
     ).filter { it.returnTypeName == "void" && it.isConcreteHookTarget() }
         .distinctBy { it.descriptor }
+}
+
+/**
+ * Bước bung một MODULE kết quả search thành các unit con.
+ *
+ * Đây là chỗ quảng cáo trong kết quả tìm kiếm thực sự được sinh ra, và là lý do
+ * [searchResultsEdgeListFingerprint] một mình không đủ: `BW4.<init>` được gọi từ BẢY
+ * chỗ khác nhau, và method mà fingerprint kia hook chỉ là một trong bảy. Module quảng
+ * cáo đi vào method này dưới dạng một unit MANG ROLE, rồi các kết quả con mới được
+ * tạo bên trong và đổ vào hai ImmutableList.Builder được truyền vào — nên đường kia
+ * không bao giờ nhìn thấy chúng.
+ *
+ * Neo bằng CẶP chuỗi. `module_results` một mình xuất hiện ở nhiều tầng; đi cùng
+ * `SearchModuleToResultsConnection` thì khớp đúng MỘT method trên toàn bộ dex đã
+ * kiểm chứng.
+ *
+ * Không phải hook render: method trả về void và chỉ đổ dữ liệu vào builder. Hook
+ * tiêu thụ nó xét role của module trước khi bỏ qua, nên module organic không bị đụng.
+ */
+val searchModuleExpansionFingerprint = findMethodDirect {
+    findMethod {
+        matcher {
+            returnType = "void"
+            usingStrings(listOf("SearchModuleToResultsConnection", "module_results"))
+        }
+    }.first { it.isConcreteHookTarget() }
 }
